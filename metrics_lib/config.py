@@ -136,11 +136,19 @@ def _require(house_dir: Path, name: str, purpose: str) -> str:
 
 
 def _resolve_dir(house_dir: Path, value: str) -> Path:
-    """A relative setting is resolved against house_dir; an absolute one is used as-is."""
+    """A relative setting is resolved against house_dir; an absolute one is used as-is.
+
+    The result is tidied up (os.path.normpath) so that a setting written the natural
+    way, `../../data/metrics`, does not turn every path in an error message into
+    something with `../..` sitting in the middle of it. A person has to read those
+    messages, so they say where the folder actually is.
+    """
+    import os as _os
+
     path = Path(value).expanduser()
-    if path.is_absolute():
-        return path
-    return house_dir / path
+    if not path.is_absolute():
+        path = house_dir / path
+    return Path(_os.path.normpath(path))
 
 
 def _resolve_secret_path(house_dir: Path) -> Path:
