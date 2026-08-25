@@ -13,10 +13,14 @@ import pytest
 
 from metrics_lib.config import HouseNotConfigured, MissingSetting, load_config
 
+# Sanctioned fake channel id - this tool names no real business or account.
+FAKE_CHANNEL_ID = "UCanchorandivydatafake"
+
 REQUIRED_ENV = {
     "METRICS_DATA_DIR": "data",
     "METRICS_SCRIPTS_DIR": "scripts",
     "METRICS_REACH_JOB_NAME": "Anchor and Ivy reach",
+    "YT_CHANNEL_ID": FAKE_CHANNEL_ID,
 }
 
 
@@ -86,6 +90,19 @@ def test_missing_reach_job_name_refuses_by_name(tmp_path, monkeypatch):
     assert "METRICS_REACH_JOB_NAME" in str(excinfo.value)
 
 
+def test_missing_channel_id_refuses_by_name_and_explains_what_it_is(tmp_path, monkeypatch):
+    # This is the important refusal: with no channel id, a wrong sign-in dropped into
+    # this house's secrets/ folder could pull another channel's numbers and nothing
+    # would catch it. That must stop the run, not just print a note and carry on.
+    monkeypatch.delenv("YT_OAUTH_CLIENT_SECRET", raising=False)
+    _set_required_env(monkeypatch, YT_CHANNEL_ID=None)
+    with pytest.raises(MissingSetting) as excinfo:
+        load_config(tmp_path)
+    message = str(excinfo.value)
+    assert "YT_CHANNEL_ID" in message
+    assert "channel" in message.lower()  # explains what a channel id is, in plain English
+
+
 # --- path resolution: relative vs absolute, and ~ expansion -----------------
 
 def test_relative_data_and_scripts_dirs_resolve_against_house_dir(tmp_path, monkeypatch):
@@ -117,12 +134,14 @@ def test_house_settings_may_come_from_dotenv_instead_of_environment(tmp_path, mo
         monkeypatch.delenv(key, raising=False)
     (tmp_path / ".env").write_text(
         "METRICS_DATA_DIR=data\nMETRICS_SCRIPTS_DIR=scripts\n"
-        "METRICS_REACH_JOB_NAME=Anchor and Ivy reach\n",
+        "METRICS_REACH_JOB_NAME=Anchor and Ivy reach\n"
+        f"YT_CHANNEL_ID={FAKE_CHANNEL_ID}\n",
         encoding="utf-8",
     )
     cfg = load_config(tmp_path)
     assert cfg.data_dir == tmp_path / "data"
     assert cfg.reach_job_name == "Anchor and Ivy reach"
+    assert cfg.channel_id == FAKE_CHANNEL_ID
 
 
 # --- everything downstream hangs off data_dir, with the old filenames kept -
@@ -188,13 +207,33 @@ def test_scope_is_readonly_analytics_only(tmp_path, monkeypatch):
     assert not any("monetary" in s for s in cfg.scopes)
 
 
-# --- optional settings unaffected ------------------------------------------
+# --- channel_id is required, api_key stays optional -------------------------
 
-def test_channel_id_and_api_key_stay_optional(tmp_path, monkeypatch):
+def test_channel_id_is_read_and_api_key_stays_optional(tmp_path, monkeypatch):
     monkeypatch.delenv("YT_OAUTH_CLIENT_SECRET", raising=False)
-    monkeypatch.delenv("YT_CHANNEL_ID", raising=False)
     monkeypatch.delenv("YOUTUBE_API_KEY", raising=False)
     _set_required_env(monkeypatch)
     cfg = load_config(tmp_path)
-    assert cfg.channel_id is None
+    assert cfg.channel_id == FAKE_CHANNEL_ID
     assert cfg.api_key is None
+
+
+# --- fix 5: a house's own .env beats a leftover value in the environment ----
+
+def test_house_dotenv_beats_the_ambient_environment(tmp_path, monkeypatch):
+    # A leftover `export METRICS_DATA_DIR=...` from testing one house in this shell
+    # must never leak into a different house's run - the house's own .env file wins.
+    monkeypatch.delenv("YT_OAUTH_CLIENT_SECRET", raising=False)
+    _set_required_env(monkeypatch, METRICS_DATA_DIR="from-environment")
+    (tmp_path / ".env").write_text("METRICS_DATA_DIR=from-dotenv\n", encoding="utf-8")
+    cfg = load_config(tmp_path)
+    assert cfg.data_dir == tmp_path / "from-dotenv"
+
+
+def test_environment_still_used_when_house_has_no_dotenv_value(tmp_path, monkeypatch):
+    # The cloud job has no .env file at all, so it must still get every value from the
+    # environment (its repository secrets) exactly as before.
+    monkeypatch.delenv("YT_OAUTH_CLIENT_SECRET", raising=False)
+    _set_required_env(monkeypatch, METRICS_DATA_DIR="from-environment")
+    cfg = load_config(tmp_path)
+    assert cfg.data_dir == tmp_path / "from-environment"

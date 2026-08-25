@@ -14,6 +14,8 @@ from metrics_lib.analytics import AnalyticsClient
 from metrics_lib.http import MetricsApiError
 
 BASE = "https://youtubeanalytics.googleapis.com/v2"
+# Sanctioned fake channel id - this tool names no real business or account.
+CHANNEL_ID = "UCanchorandivydatafake"
 
 
 class FakeTransport:
@@ -48,7 +50,7 @@ class RaisingTransport:
 
 def test_core_metrics_maps_views_and_duration_by_header_name_even_when_scrambled(load_fixture):
     transport = FakeTransport(load_fixture("analytics_core.json"))
-    client = AnalyticsClient(transport)
+    client = AnalyticsClient(transport, channel_id=CHANNEL_ID)
 
     result = client.core_metrics("vid123", "2026-01-01", "2026-07-01")
 
@@ -61,7 +63,7 @@ def test_core_metrics_maps_views_and_duration_by_header_name_even_when_scrambled
 def test_core_metrics_with_empty_rows_returns_zeros(load_fixture):
     fixture = dict(load_fixture("analytics_core.json"), rows=[])
     transport = FakeTransport(fixture)
-    client = AnalyticsClient(transport)
+    client = AnalyticsClient(transport, channel_id=CHANNEL_ID)
 
     result = client.core_metrics("vid123", "2026-01-01", "2026-07-01")
 
@@ -70,7 +72,7 @@ def test_core_metrics_with_empty_rows_returns_zeros(load_fixture):
 
 def test_core_metrics_sends_expected_params(load_fixture):
     transport = FakeTransport(load_fixture("analytics_core.json"))
-    client = AnalyticsClient(transport)
+    client = AnalyticsClient(transport, channel_id=CHANNEL_ID)
 
     client.core_metrics("vid123", "2026-01-01", "2026-07-01")
 
@@ -78,7 +80,7 @@ def test_core_metrics_sends_expected_params(load_fixture):
     call = transport.calls[0]
     assert call["url"] == f"{BASE}/reports"
     params = call["params"]
-    assert params["ids"] == "channel==MINE"
+    assert params["ids"] == f"channel=={CHANNEL_ID}"
     assert params["startDate"] == "2026-01-01"
     assert params["endDate"] == "2026-07-01"
     assert params["metrics"] == "views,averageViewDuration"
@@ -87,7 +89,7 @@ def test_core_metrics_sends_expected_params(load_fixture):
 
 def test_core_metrics_errors_propagate_unchanged():
     error = MetricsApiError(403, "insufficient permission")
-    client = AnalyticsClient(RaisingTransport(error))
+    client = AnalyticsClient(RaisingTransport(error), channel_id=CHANNEL_ID)
 
     with pytest.raises(MetricsApiError) as ei:
         client.core_metrics("vid123", "2026-01-01", "2026-07-01")
@@ -99,7 +101,7 @@ def test_core_metrics_errors_propagate_unchanged():
 
 def test_retention_curve_returns_points_with_relative_retention(load_fixture):
     transport = FakeTransport(load_fixture("analytics_retention.json"))
-    client = AnalyticsClient(transport)
+    client = AnalyticsClient(transport, channel_id=CHANNEL_ID)
 
     points = client.retention_curve("vid123", "2026-01-01", "2026-07-01")
 
@@ -128,7 +130,7 @@ def test_retention_curve_without_relative_column_is_none():
         ],
     }
     transport = FakeTransport(fixture)
-    client = AnalyticsClient(transport)
+    client = AnalyticsClient(transport, channel_id=CHANNEL_ID)
 
     points = client.retention_curve("vid123", "2026-01-01", "2026-07-01")
 
@@ -140,12 +142,12 @@ def test_retention_curve_without_relative_column_is_none():
 
 def test_retention_curve_sends_expected_params(load_fixture):
     transport = FakeTransport(load_fixture("analytics_retention.json"))
-    client = AnalyticsClient(transport)
+    client = AnalyticsClient(transport, channel_id=CHANNEL_ID)
 
     client.retention_curve("vid123", "2026-01-01", "2026-07-01")
 
     params = transport.calls[0]["params"]
-    assert params["ids"] == "channel==MINE"
+    assert params["ids"] == f"channel=={CHANNEL_ID}"
     assert params["startDate"] == "2026-01-01"
     assert params["endDate"] == "2026-07-01"
     assert params["dimensions"] == "elapsedVideoTimeRatio"
@@ -158,7 +160,7 @@ def test_retention_curve_sends_expected_params(load_fixture):
 
 def test_traffic_mix_computes_percent_of_total_including_other_sources(load_fixture):
     transport = FakeTransport(load_fixture("analytics_traffic.json"))
-    client = AnalyticsClient(transport)
+    client = AnalyticsClient(transport, channel_id=CHANNEL_ID)
 
     result = client.traffic_mix("vid123", "2026-01-01", "2026-07-01")
 
@@ -178,7 +180,7 @@ def test_traffic_mix_zero_total_views_returns_zeros():
         "rows": [],
     }
     transport = FakeTransport(fixture)
-    client = AnalyticsClient(transport)
+    client = AnalyticsClient(transport, channel_id=CHANNEL_ID)
 
     result = client.traffic_mix("novid", "2026-01-01", "2026-07-01")
 
@@ -199,7 +201,7 @@ def test_traffic_mix_source_absent_from_rows_counts_as_zero():
         ],
     }
     transport = FakeTransport(fixture)
-    client = AnalyticsClient(transport)
+    client = AnalyticsClient(transport, channel_id=CHANNEL_ID)
 
     result = client.traffic_mix("vid123", "2026-01-01", "2026-07-01")
 
@@ -208,12 +210,12 @@ def test_traffic_mix_source_absent_from_rows_counts_as_zero():
 
 def test_traffic_mix_sends_expected_params(load_fixture):
     transport = FakeTransport(load_fixture("analytics_traffic.json"))
-    client = AnalyticsClient(transport)
+    client = AnalyticsClient(transport, channel_id=CHANNEL_ID)
 
     client.traffic_mix("vid123", "2026-01-01", "2026-07-01")
 
     params = transport.calls[0]["params"]
-    assert params["ids"] == "channel==MINE"
+    assert params["ids"] == f"channel=={CHANNEL_ID}"
     assert params["startDate"] == "2026-01-01"
     assert params["endDate"] == "2026-07-01"
     assert params["dimensions"] == "insightTrafficSourceType"
@@ -227,19 +229,6 @@ def test_client_base_url_constant():
 
 # ---- channel-identity guard, Net A: channel_id targets every call -----------
 # (see metrics.py's module docstring for the full two-net picture)
-
-CHANNEL_ID = "UCanchorandivydatafake"
-
-
-def test_no_channel_id_sends_channel_equals_mine(load_fixture):
-    # A house that has not configured a channel id yet keeps today's exact
-    # behaviour - this must never turn an already-green daily job red.
-    transport = FakeTransport(load_fixture("analytics_core.json"))
-    client = AnalyticsClient(transport)
-
-    client.core_metrics("vid123", "2026-01-01", "2026-07-01")
-
-    assert transport.calls[0]["params"]["ids"] == "channel==MINE"
 
 
 def test_channel_id_targets_core_metrics(load_fixture):
@@ -298,15 +287,6 @@ def test_probe_channel_sends_a_minimal_one_day_channel_query():
     assert params["endDate"] == "2026-08-25"
     assert params["metrics"] == "views"
     assert "filters" not in params  # no video needed - this never depends on one existing
-
-
-def test_probe_channel_with_no_channel_id_uses_channel_equals_mine():
-    transport = FakeTransport({"columnHeaders": [], "rows": []})
-    client = AnalyticsClient(transport)
-
-    client.probe_channel("2026-08-25")
-
-    assert transport.calls[0]["params"]["ids"] == "channel==MINE"
 
 
 def test_probe_channel_propagates_a_403_unchanged():

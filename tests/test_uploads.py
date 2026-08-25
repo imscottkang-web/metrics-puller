@@ -53,6 +53,7 @@ def _playlist_body(rows):
 def _config(tmp_path, **extra):
     house_dir = tmp_path / "house"
     house_dir.mkdir(parents=True)
+    extra.setdefault("channel_id", CHANNEL_ID)
     return Config(
         house_dir=house_dir,
         client_secret_path=house_dir / "secrets" / "cs.json",
@@ -239,8 +240,8 @@ class FakeUploads:
 class _NoOpAnalytics:
     """Just enough of an analytics client for the channel-identity preflight (see
     metrics.py's _check_channel_identity) to pass without complaint - these tests are
-    about the published-video list, not that guard, and a config with a channel_id set
-    (needed for gather_published_videos) would otherwise call probe_channel on None."""
+    about the published-video list, not that guard, and the preflight always runs now
+    that every Config carries a channel_id."""
 
     def probe_channel(self, on_date):
         pass
@@ -272,7 +273,7 @@ def test_no_key_configured_says_so_plainly_and_keeps_the_run_green(tmp_path):
 
     assert failure is None
     assert not config.published_videos_json.exists()
-    assert "no Data API key or channel id is configured" in " ".join(said)
+    assert "no public Data API key is configured" in " ".join(said)
 
 
 def test_a_failed_call_keeps_the_previous_list_untouched(tmp_path):
@@ -313,7 +314,7 @@ def test_an_unconfigured_list_leaves_the_run_green(tmp_path, monkeypatch):
     monkeypatch.setattr(cli.reach_archive_mod, "gather_reach_rows",
                         lambda client, archive_dir, printer=print: [])
 
-    code = cli.dispatch("pull", config=config, reporting_client=None, analytics_client=None,
+    code = cli.dispatch("pull", config=config, reporting_client=None, analytics_client=_NoOpAnalytics(),
                         uploads_client=None, today=date(2026, 8, 25), out=lambda *a: None)
 
     assert code == 0
@@ -328,17 +329,16 @@ def test_the_list_lands_where_the_daily_job_already_commits(tmp_path):
     assert config.published_videos_json.parent == config.snapshots_csv.parent
 
 
-def test_the_uploads_client_is_only_built_when_both_halves_are_configured(tmp_path,
-                                                                         monkeypatch):
-    """A key with no channel, or a channel with no key, cannot ask anything. Not built rather
-    than built to fail on every daily run."""
+def test_the_uploads_client_is_only_built_when_a_data_api_key_is_configured(tmp_path,
+                                                                            monkeypatch):
+    """The channel id is always configured now (Config requires it), so the public Data
+    API key is the only thing left gating this client. No key, no client - not built
+    rather than built to fail on every daily run."""
     monkeypatch.setattr(cli, "Transport", lambda *a, **k: None)
     monkeypatch.setattr(cli, "OAuthTokenProvider", lambda *a, **k: None)
     monkeypatch.setattr(cli, "ReportingClient", lambda *a, **k: None)
     monkeypatch.setattr(cli, "AnalyticsClient", lambda *a, **k: None)
 
     assert cli.build_clients(_config(tmp_path))[2] is None
-    assert cli.build_clients(_config(tmp_path / "b", api_key="k"))[2] is None
-    assert cli.build_clients(_config(tmp_path / "c", channel_id=CHANNEL_ID))[2] is None
-    both = cli.build_clients(_config(tmp_path / "d", api_key="k", channel_id=CHANNEL_ID))[2]
-    assert isinstance(both, uploads_mod.UploadsClient)
+    with_key = cli.build_clients(_config(tmp_path / "b", api_key="k"))[2]
+    assert isinstance(with_key, uploads_mod.UploadsClient)

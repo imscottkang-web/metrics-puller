@@ -49,10 +49,14 @@ def load_fixture():
     return _load
 
 
+# Sanctioned fake channel id - this tool names no real business or account.
+FAKE_CHANNEL_ID = "UCanchorandivydatafake"
+
+
 @pytest.fixture
 def cfg(tmp_path, monkeypatch):
     """A Config rooted at a fresh tmp_path (as house_dir), with no client-secret env
-    override. The three now-required house settings are set here via the environment
+    override. The four now-required house settings are set here via the environment
     so tests that only care about auth/paths do not each have to supply them.
 
     Imported lazily so conftest still collects before metrics_lib.config exists.
@@ -61,6 +65,7 @@ def cfg(tmp_path, monkeypatch):
     monkeypatch.setenv("METRICS_DATA_DIR", "data")
     monkeypatch.setenv("METRICS_SCRIPTS_DIR", "scripts")
     monkeypatch.setenv("METRICS_REACH_JOB_NAME", "Anchor and Ivy reach")
+    monkeypatch.setenv("YT_CHANNEL_ID", FAKE_CHANNEL_ID)
     from metrics_lib.config import load_config
 
     return load_config(tmp_path)

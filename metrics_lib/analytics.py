@@ -36,25 +36,25 @@ def _rows_to_dicts(column_headers: list[dict], rows: list[list]) -> list[dict]:
 class AnalyticsClient:
     """Read-only client for the YouTube Analytics API v2 `/reports` endpoint.
 
-    channel_id, when given, is sent as "channel==<id>" on every call instead of the
-    default "channel==MINE" - that is Net A of the two-net guard against a house
-    running with a sign-in that belongs to a different channel (see metrics.py's module
-    docstring for the full picture): with a wrong token, YouTube then answers 403
-    ("insufficient permission") rather than happily returning some other channel's
-    numbers. When channel_id is None (a house that has not configured one yet),
-    "channel==MINE" is used exactly as before, so a house with no channel id stays on
-    its existing, already-green behaviour.
+    channel_id is required and is sent as "channel==<id>" on every call, never
+    "channel==MINE" - that is Net A of the two-net guard against a house running with
+    a sign-in that belongs to a different channel (see metrics.py's module docstring
+    for the full picture): with a wrong token, YouTube then answers 403 ("insufficient
+    permission") rather than happily returning some other channel's numbers. There is
+    no "channel==MINE" fallback any more - a house that has not been told its own
+    channel id cannot build this client at all (see metrics_lib.config.load_config),
+    so this class never has to guess whose numbers it is asking for.
     """
 
     BASE = BASE
 
-    def __init__(self, transport, channel_id: str | None = None) -> None:
+    def __init__(self, transport, channel_id: str) -> None:
         self._transport = transport
         self._channel_id = channel_id
 
     @property
     def _ids(self) -> str:
-        return f"channel=={self._channel_id}" if self._channel_id else "channel==MINE"
+        return f"channel=={self._channel_id}"
 
     def probe_channel(self, on_date: str) -> None:
         """The cheapest possible call against this client's channel: total views for

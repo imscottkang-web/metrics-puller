@@ -19,26 +19,26 @@ Channel-identity guard (the thing this must never let happen): this tool is
 shared by more than one YouTube channel ("house"). Each house is handed its
 own house_dir (see metrics_lib.config), and that separation - one house, one
 folder, one saved sign-in file - is the PRIMARY defence against a house
-running with the wrong channel's numbers. run_pull adds a second net for the
-day that primary defence is somehow bypassed anyway (e.g. a token file
-copied by hand into the wrong house's secrets/ folder): before anything is
-read for real or written to the CSV, it checks that the saved sign-in
-actually belongs to the channel this house was configured with
-(Config.channel_id). Two independent checks, because either alone can miss
-a mismatch:
-  - Net A: every real Analytics API call already asks for this house's
-    specific channel id (see metrics_lib.analytics.AnalyticsClient), not
-    just "whichever channel this token happens to be signed in as" - so a
-    wrong token gets refused by YouTube (403) instead of happily returning
+running with the wrong channel's numbers. Every house must also be told its
+own channel id (YT_CHANNEL_ID - see metrics_lib.config.load_config, which
+refuses to run without it), which adds a second net for the day the primary
+defence is somehow bypassed anyway (e.g. a token file copied by hand into the
+wrong house's secrets/ folder): before anything is read for real or written
+to the CSV, it checks that the saved sign-in actually belongs to the channel
+this house was configured with (Config.channel_id). Two independent checks,
+because either alone can miss a mismatch:
+  - Net A: every real Analytics API call is addressed to this house's
+    specific channel id (see metrics_lib.analytics.AnalyticsClient), never
+    "whichever channel this token happens to be signed in as" - so a wrong
+    token gets refused by YouTube (403) instead of happily returning
     someone else's numbers.
-  - Net B: a preflight in run_pull makes one cheap probe call and, when that
-    is not conclusive (e.g. the API cannot be reached), also cross-checks
-    the channel id already recorded in this house's own locally archived
-    reach reports. Either check failing raises ChannelMismatch, which stops
-    the run before any row is written.
-A house with no channel_id configured yet cannot run either check (there is
-nothing to compare against) - that is a setup state, not a failure, and
-must not turn the run red.
+  - Net B: a preflight (run before run_pull's per-video loop, and before
+    setup-reach-job creates anything) makes one cheap probe call and, when
+    that is not conclusive (e.g. the API cannot be reached), also
+    cross-checks the channel id already recorded in this house's own
+    locally archived reach reports. Either check failing raises
+    ChannelMismatch, which stops the run before any row is written or any
+    job is created.
 
 Exit codes (returned by dispatch(), and therefore by main()):
   0  ok - everything requested completed with no failures or warnings.
@@ -57,8 +57,9 @@ Exit codes (returned by dispatch(), and therefore by main()):
      so those cells are blank, and/or the channel's published-video list could
      not be read (the previous list is kept), and/or the registry reported
      warnings about a bet card it had to skip. Re-run to retry what was missed.
-     NOT this: no Data API key or channel id configured at all. That is a
-     setup state rather than a failure, and it stays green.
+     NOT this: no Data API key configured at all, so the published-video
+     list is simply not built. That is a setup state rather than a failure,
+     and it stays green.
   5  a snapshot schema problem (SnapshotError) - weekly_snapshots.csv is not
      shaped the way the writer expects (e.g. a stale or hand-edited header);
      no row is appended until the file is fixed.
@@ -98,50 +99,60 @@ class ChannelMismatch(Exception):
 
 def _channel_mismatch_message(config: Config) -> str:
     return (
-        "This saved sign-in does not look like it belongs to the YouTube channel this "
-        f"house was configured with (channel id {config.channel_id}). Refusing to pull "
-        "any numbers with it - continuing could record another channel's numbers under "
-        "this house's name, or mean two houses are sharing one sign-in without anyone "
-        "noticing. Nothing was written this run. "
+        "This saved sign-in was refused for the YouTube channel this house was "
+        f"configured with (channel id {config.channel_id}). Two things can cause that: "
+        "the sign-in belongs to a different channel, or this channel's own sign-in has "
+        "lost access (a revoked permission, or the API turned off for this project) - "
+        "both look the same from here. Refusing to pull any numbers with it - "
+        "continuing could record another channel's numbers under this house's name, or "
+        "mean two houses are sharing one sign-in without anyone noticing. Nothing was "
+        "written this run. "
         f"Fix: delete the saved sign-in file at {config.token_path} and run this tool "
         f"locally for the house at {config.house_dir} to sign in again, making sure to "
-        "pick the right channel's account when the browser asks."
+        "pick the right channel's account when the browser asks; if that does not help, "
+        "check the channel's API access and permissions in the Google Cloud project."
     )
 
 
 def _check_channel_identity(config: Config, analytics_client, *, today, out=print) -> None:
     """Net A is the shape of every real Analytics call (see AnalyticsClient); this is
-    Net B - a preflight, run before anything else in run_pull, so a mismatch is caught
-    before any row is written rather than partway through the per-video loop.
+    Net B - a preflight, run before anything else in run_pull (and before
+    run_setup_reach_job creates anything), so a mismatch is caught before any row is
+    written or any job is created, rather than partway through the per-video loop.
 
     Two independent checks, because either one alone can miss a mismatch:
       - a live probe call, targeted at config.channel_id; a 403 means the token is for
-        a different channel;
+        a different channel (or has lost access to this one - see
+        _channel_mismatch_message);
       - the channel id already recorded in this house's own locally archived reach
         reports (metrics_lib.reach_archive.read_archived_reach_rows) - this one keeps
-        working even when the API cannot be reached at all.
-    Neither check can run without a configured channel_id (there is nothing to compare
-    against), so that case prints one line and does nothing further: a house that has
-    not set one up yet is a setup state, not a failure, and must not turn the run red.
+        working even when the API cannot be reached at all, so a probe call that fails
+        for any OTHER reason (not a 403) does not abort the run: it is reported in one
+        plain line and this second check still runs. A genuine total API outage still
+        fails later, in the per-video loop, exactly as it did before this preflight
+        existed.
+    config.channel_id is always set (metrics_lib.config.load_config refuses to build a
+    Config without one), so both checks always run.
     """
-    if config.channel_id is None:
-        out(
-            "Could not check the saved sign-in against a channel id, because no "
-            "channel id is configured for this house. Skipping this check; every "
-            "number below is unaffected."
-        )
-        return
-
     try:
         analytics_client.probe_channel(today.isoformat())
     except MetricsApiError as exc:
         if exc.status == 403:
             raise ChannelMismatch(_channel_mismatch_message(config)) from None
-        raise
+        out(
+            f"Could not reach YouTube to check the sign-in this run ({exc.status} "
+            f"{exc.reason}). Falling back to the local archive cross-check."
+        )
 
     archived_rows = reach_archive_mod.read_archived_reach_rows(config.reach_reports_dir)
     seen_channels = {row["channel_id"] for row in archived_rows if row.get("channel_id")}
-    if seen_channels and config.channel_id not in seen_channels:
+    if archived_rows and not seen_channels:
+        out(
+            "Could not cross-check the sign-in against the local reach-report archive: "
+            "none of the archived reports include a channel id column, so this half of "
+            "the check could not be made. Every number below is unaffected."
+        )
+    elif seen_channels and config.channel_id not in seen_channels:
         raise ChannelMismatch(_channel_mismatch_message(config))
 
 
@@ -265,9 +276,10 @@ def write_published_video_list(config, uploads_client, *, today, out=print):
 
     Three ways it can end, and only one of them is a problem:
 
-    * no client at all - no Data API key or no channel id is configured, so there is nothing
-      to ask. One plain line, no row lost, the run stays green. A feature nobody has switched
-      on yet must never turn a daily job red.
+    * no client at all - no public Data API key is configured (the channel id always is;
+      see metrics_lib.config.load_config), so there is nothing to ask with. One plain
+      line, no row lost, the run stays green. A feature nobody has switched on yet must
+      never turn a daily job red.
     * the call fails - degraded exactly like the reach step: say so, keep the previous list
       (the file is not touched), and let the caller count it toward a partial run.
     * it worked - the list is rewritten with today's date on it.
@@ -275,8 +287,8 @@ def write_published_video_list(config, uploads_client, *, today, out=print):
     Returns the failure reason, or None.
     """
     if uploads_client is None:
-        out("No published-video list this run: no Data API key or channel id is configured, "
-            "so nothing asked the channel what it has posted. Every number above is unaffected.")
+        out("No published-video list this run: no public Data API key is configured, so "
+            "nothing asked the channel what it has posted. Every number above is unaffected.")
         return None
     try:
         videos = uploads_mod.gather_published_videos(uploads_client, config.channel_id)
@@ -430,6 +442,10 @@ def dispatch(command, *, config, reporting_client, analytics_client, today, out=
     """
     try:
         if command == "setup-reach-job":
+            # This command CREATES a report job on YouTube - a write, not a read - so the
+            # same channel-identity check run_pull does before writing anything runs here
+            # too, before the job is created, not after.
+            _check_channel_identity(config, analytics_client, today=today, out=out)
             job_id = run_setup_reach_job(reporting_client, config.reach_job_name, printer=out)
             out(f"Reach-report job ready (id: {job_id}).")
             out("Impressions and click-through rate start accruing from now; they do not backfill.")
@@ -471,14 +487,14 @@ def dispatch(command, *, config, reporting_client, analytics_client, today, out=
 def build_clients(config):
     """Build the real read-only clients over an OAuth transport (needs Google libs).
 
-    The uploads client is the odd one out and is None unless BOTH a public Data API key and a
-    channel id are configured - it reads the PUBLIC listing with a key rather than the private
-    numbers with the OAuth token, and a half-configured pair (a key with no channel, or the
-    other way about) cannot ask anything, so it is not built rather than built to fail.
+    The uploads client is the odd one out and is None unless a public Data API key is
+    configured - it reads the PUBLIC listing with a key rather than the private numbers
+    with the OAuth token. (The channel id it also needs is always present - see
+    metrics_lib.config.load_config - so the key is the only thing that gates it now.)
     """
     transport = Transport(OAuthTokenProvider(config), timeout=config.timeout)
     uploads_client = None
-    if config.api_key and config.channel_id:
+    if config.api_key:
         uploads_client = uploads_mod.UploadsClient(
             ApiKeyTransport(config.api_key, timeout=config.timeout))
     return ReportingClient(transport), AnalyticsClient(transport, config.channel_id), uploads_client

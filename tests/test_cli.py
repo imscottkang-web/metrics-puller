@@ -110,6 +110,7 @@ def _patch_reach_rows(monkeypatch, rows):
 def _config(tmp_path, **extra):
     house_dir = tmp_path / "house"
     house_dir.mkdir(parents=True)
+    extra.setdefault("channel_id", CHANNEL_ID)
     return Config(
         house_dir=house_dir,
         client_secret_path=house_dir / "secrets" / "cs.json",
@@ -251,15 +252,38 @@ def test_pull_reports_only_the_videos_it_recorded(tmp_path):
 def test_setup_reach_job_reports_job_id(tmp_path):
     config = _config(tmp_path)
     reporting = FakeReporting(job_id="job-XYZ")
+    analytics = FakeAnalytics()
     out = []
     rc = cli.dispatch(
         "setup-reach-job",
-        config=config, reporting_client=reporting, analytics_client=FakeAnalytics(),
+        config=config, reporting_client=reporting, analytics_client=analytics,
         today=date(2026, 7, 12), out=out.append,
     )
     assert rc == 0
     assert reporting.ensure_calls == 1
     assert any("job-XYZ" in line for line in out)
+    assert analytics.probe_calls == ["2026-07-12"]  # the channel check ran before creating anything
+
+
+def test_setup_reach_job_checks_the_channel_before_creating_anything(tmp_path):
+    # setup-reach-job CREATES a job on YouTube - a write, not a read - so a wrong
+    # sign-in here would create a job on somebody else's channel. The same
+    # ChannelMismatch refusal that guards `pull` must guard this too, before the
+    # reporting client is ever called.
+    config = _config(tmp_path, channel_id=CHANNEL_ID)
+    reporting = FakeReporting(job_id="job-XYZ")
+    analytics = FakeAnalytics(probe_exc=MetricsApiError(403, "insufficient permission"))
+    out = []
+
+    rc = cli.dispatch(
+        "setup-reach-job",
+        config=config, reporting_client=reporting, analytics_client=analytics,
+        today=date(2026, 7, 12), out=out.append,
+    )
+
+    assert rc == 2
+    assert reporting.ensure_calls == 0  # nothing was created
+    assert any(CHANNEL_ID in line for line in out)
 
 
 def test_dispatch_reauth_prints_plain_english(tmp_path):
@@ -548,24 +572,6 @@ def _archive_reach_channel_row(config, day, channel_id, video_id="vidREAL01"):
     )
 
 
-def test_no_channel_id_configured_skips_the_check_and_stays_green(tmp_path):
-    # A house that has not set YT_CHANNEL_ID up yet is a setup state, not a
-    # failure - this must never turn an already-green daily job red.
-    config = _config(tmp_path)  # channel_id defaults to None
-    assert config.channel_id is None
-    analytics = FakeAnalytics()
-    out = []
-
-    rc = cli.dispatch(
-        "pull", config=config, reporting_client=FakeReporting(), analytics_client=analytics,
-        today=date(2026, 7, 12), out=out.append,
-    )
-
-    assert rc == 0
-    assert analytics.probe_calls == []  # never even attempted
-    assert any("no channel id is configured" in line for line in out)
-
-
 def test_matching_channel_id_lets_the_pull_proceed(tmp_path):
     config = _config(tmp_path, channel_id=CHANNEL_ID)
     _write_bet_card(config, "seller-repairs", "vidREAL01")
@@ -609,9 +615,11 @@ def test_dispatch_channel_mismatch_from_probe_exits_2_no_traceback(tmp_path):
     assert any(CHANNEL_ID in line for line in out)
 
 
-def test_probe_call_non_403_is_not_treated_as_a_mismatch(tmp_path):
-    # Only a 403 is evidence of a wrong channel; any other API problem is a normal
-    # top-level failure (exit 3), not this guard's business.
+def test_probe_call_non_403_falls_back_to_the_archive_check_instead_of_aborting(tmp_path):
+    # Only a 403 is evidence of a wrong channel. Any other probe failure (the API could
+    # not be reached at all, say) must NOT kill the whole run - it falls through to the
+    # local archive cross-check, which still catches a real mismatch, and otherwise lets
+    # the pull proceed. A genuine total outage still fails later, in the per-video loop.
     config = _config(tmp_path, channel_id=CHANNEL_ID)
     _write_bet_card(config, "seller-repairs", "vidREAL01")
     analytics = FakeAnalytics(probe_exc=MetricsApiError(500, "backend blip"))
@@ -622,7 +630,23 @@ def test_probe_call_non_403_is_not_treated_as_a_mismatch(tmp_path):
         today=date(2026, 7, 12), out=out.append,
     )
 
-    assert rc == 3
+    assert rc == 0
+    assert any("could not reach youtube" in line.lower() for line in out)
+    assert config.snapshots_csv.exists()
+
+
+def test_probe_call_non_403_still_catches_a_real_mismatch_via_the_archive(tmp_path):
+    # The archive cross-check must still run and still refuse, even though the live
+    # probe itself could not be reached - that is the whole point of it being a
+    # second, independent check.
+    config = _config(tmp_path, channel_id=CHANNEL_ID)
+    _write_bet_card(config, "seller-repairs", "vidREAL01")
+    _archive_reach_channel_row(config, "20260701", "UC_some_other_channel_entirely")
+    analytics = FakeAnalytics(probe_exc=MetricsApiError(500, "backend blip"))
+
+    with pytest.raises(cli.ChannelMismatch):
+        cli.run_pull(config, FakeReporting(), analytics, today=date(2026, 7, 12))
+
     assert not config.snapshots_csv.exists()
 
 
@@ -650,3 +674,25 @@ def test_no_archived_reach_rows_yet_is_not_a_mismatch(tmp_path):
     summary = cli.run_pull(config, FakeReporting(), analytics, today=date(2026, 7, 12))
 
     assert summary["appended"] == 1
+
+
+def test_archived_rows_with_no_channel_id_column_says_so_loudly_rather_than_passing_silently(tmp_path):
+    # If YouTube's real reach report never carries a channel_id column, seen_channels is
+    # always empty and this half of the guard would silently never fire. That must be
+    # visible, not silent - one plain line, and the run still proceeds (nothing here is
+    # itself a mismatch, since there is nothing left to compare against).
+    config = _config(tmp_path, channel_id=CHANNEL_ID)
+    _write_bet_card(config, "seller-repairs", "vidREAL01")
+    config.reach_reports_dir.mkdir(parents=True, exist_ok=True)
+    (config.reach_reports_dir / "20260701.csv").write_text(
+        "date,video_id,video_thumbnail_impressions,video_thumbnail_impressions_ctr\n"
+        "2026-07-01,vidREAL01,1000,0.048\n",
+        encoding="utf-8",
+    )
+    analytics = FakeAnalytics()
+    out = []
+
+    summary = cli.run_pull(config, FakeReporting(), analytics, today=date(2026, 7, 12), out=out.append)
+
+    assert summary["appended"] == 1
+    assert any("channel id column" in line.lower() for line in out)

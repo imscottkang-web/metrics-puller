@@ -10,11 +10,15 @@ HouseNotConfigured for what happens when nothing is handed in.
 
 The only secret-adjacent value here is a PATH to the OAuth client-secret file
 and the saved token; the secret contents live in those files, never in this
-module. Resolution for every setting below (mirrors the radar's api-key
-resolution): the environment variable first, then a .env file at house_dir,
-then - for paths only - a fixed default filename under house_dir/secrets/.
-There is no fallback for the settings that name a house's own folders; those
-must be set explicitly, on purpose, for every house.
+module. Resolution for every house-specific setting below: this house's own
+.env file first, then the environment variable, then - for paths only - a
+fixed default filename under house_dir/secrets/. The .env file wins on
+purpose (see _resolve) - these settings name one house's own identity and
+folders, and a value left exported in a shell for one house must never leak
+into another house's run. The cloud job has no .env file, so it is unaffected
+and still gets every value from the environment exactly as before. There is
+no fallback for the settings that name a house's own folders; those must be
+set explicitly, on purpose, for every house.
 """
 
 from dataclasses import dataclass
@@ -53,12 +57,17 @@ class Config:
     # published-video list are written
     scripts_dir: Path  # this house's video script folders (each with a bet_card.md)
     reach_job_name: str  # this house's YouTube Reporting API reach-report job name
+    # This house's own YouTube channel id. Required: it is how every real API call is
+    # addressed to THIS channel rather than "whichever account the saved sign-in happens
+    # to be for", and how the channel-identity guard in metrics.py tells a wrong sign-in
+    # apart from the right one. A house that has not been told its own channel id cannot
+    # run at all - see load_config below.
+    channel_id: str
     timeout: int = 20
-    # The PUBLIC Data API key and the channel it reads, for the published-video list the
-    # channel watcher matches against. Both None where they were never configured, which is
-    # a setup state rather than a failure: the pull still records every number it always did.
+    # The PUBLIC Data API key for the published-video list the channel watcher matches
+    # against. None where it was never configured, which is a setup state rather than a
+    # failure: the pull still records every number it always did, just without that list.
     api_key: str | None = None
-    channel_id: str | None = None
 
     @property
     def scopes(self) -> list[str]:
@@ -110,12 +119,19 @@ def _parse_dotenv(path: Path) -> dict[str, str]:
 
 
 def _resolve(house_dir: Path, name: str) -> str | None:
-    """An environment value, else the same name out of house_dir's .env, else None.
+    """This house's own .env value, else the same name out of the environment, else None.
 
-    The environment is checked first (which is how a cloud job passes a repository secret
-    in), then a local .env file for a Mac running this by hand.
+    The .env file is checked FIRST, on purpose: these settings name one house's own
+    folders and identity, and Scott's Mac keeps more than one house's .env around while
+    an environment variable exported for one channel (e.g. testing METRICS_DATA_DIR by
+    hand) stays set in that same shell afterwards. If the environment won every time, a
+    leftover export for channel A would silently point channel B's run at channel A's
+    data folder - exactly the cross-house mix-up this module exists to rule out. A house
+    with no .env value for a name simply falls through to the environment, which is how
+    the cloud job (no .env file at all) still gets every value from its repository
+    secrets, unchanged from before.
     """
-    value = os.environ.get(name) or _parse_dotenv(house_dir / ".env").get(name)
+    value = _parse_dotenv(house_dir / ".env").get(name) or os.environ.get(name)
     return value.strip() or None if value else None
 
 
@@ -199,6 +215,15 @@ def load_config(house_dir: Path | None = None) -> Config:
         "API, so this house's job can be told apart from any other house's job in the "
         "Google API console.",
     )
+    channel_id = _require(
+        house_dir, "YT_CHANNEL_ID",
+        "This is this house's own YouTube channel id - not a secret, just the id string "
+        "(it starts with 'UC') found on the channel's 'About' page or in YouTube Studio "
+        "under Settings > Channel > Advanced settings. It is how this tool knows the "
+        "saved sign-in in secrets/ really belongs to this house's channel and not some "
+        "other channel's - without it, a sign-in file dropped into the wrong house's "
+        "folder could pull the wrong channel's numbers with nothing to catch it.",
+    )
 
     return Config(
         house_dir=house_dir,
@@ -207,6 +232,6 @@ def load_config(house_dir: Path | None = None) -> Config:
         data_dir=_resolve_dir(house_dir, data_dir_value),
         scripts_dir=_resolve_dir(house_dir, scripts_dir_value),
         reach_job_name=reach_job_name,
+        channel_id=channel_id,
         api_key=_resolve(house_dir, "YOUTUBE_API_KEY"),
-        channel_id=_resolve(house_dir, "YT_CHANNEL_ID"),
     )

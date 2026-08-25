@@ -26,7 +26,7 @@ A "house" is one channel's own folder, holding:
 - `.env` - that channel's settings (see the table below).
 - `secrets/` - that channel's downloaded OAuth client-secret file and its saved sign-in. Never committed; keep this folder out of version control.
 
-Every setting below is read from the environment first, then from that `.env` file, so a cloud job can pass settings in as repository secrets while a local run can just keep a `.env` file in the house folder.
+Every setting below is read from that `.env` file first, then from the environment, so a local run can just keep a `.env` file in the house folder while a cloud job (which has no `.env` file) still passes settings in as repository secrets.
 
 | Setting | Required? | What it is for |
 |---|---|---|
@@ -34,18 +34,20 @@ Every setting below is read from the environment first, then from that `.env` fi
 | `METRICS_DATA_DIR` | Yes | Where this house's weekly snapshot CSV, retention curves, reach-report archive, and published-video list get written. A relative path is resolved against the house folder; an absolute path is used as-is. |
 | `METRICS_SCRIPTS_DIR` | Yes | This house's folder of video script folders (each one holding a `bet_card.md`), which is how the tool knows which videos to record numbers for. Same relative/absolute rule as above. |
 | `METRICS_REACH_JOB_NAME` | Yes | The name given to this house's reach-report job inside the YouTube Reporting API, so this house's job can be told apart from any other house's job in the Google API console. |
+| `YT_CHANNEL_ID` | Yes | This house's own YouTube channel id (starts with `UC`, found on the channel's "About" page or in YouTube Studio under Settings > Channel > Advanced settings). This is how the tool knows the saved sign-in in `secrets/` really belongs to this house's channel and not some other channel's - see "Safety checks" below. Also turns on the published-video list when `YOUTUBE_API_KEY` is set too. |
 | `YT_OAUTH_CLIENT_SECRET` | No | Full path to the downloaded OAuth "Desktop app" client-secret file. If unset, the tool looks for `secrets/client_secret.json` inside the house folder. |
-| `YT_CHANNEL_ID` | No | This house's YouTube channel id. Not required to pull the numbers above, but turns on two extra things: the published-video list (see below), and the channel-identity check (see "Safety checks" below). A house that has not set this up yet is simply missing those two extras - the daily pull still runs and stays green. |
 | `YOUTUBE_API_KEY` | No | A public YouTube Data API key. Combined with `YT_CHANNEL_ID`, this lets the tool ask the channel what it has publicly posted, and write that list down for other tools to match new videos against their script folders. |
 
 If `METRICS_HOUSE` (or an equivalent path passed in directly) is missing, the tool refuses to run at all and prints a plain-English explanation of what to set.
-If any of the three required settings above is missing, the tool refuses the same way, naming exactly which setting is missing and what it is for.
+If any of the four required settings above is missing, the tool refuses the same way, naming exactly which setting is missing and what it is for.
 There is deliberately no shared fallback location for any of these - a shared default is exactly the mix-up this tool is built to avoid.
+
+For every setting above, this house's own `.env` file is checked before the environment - so a value left exported in a shell from testing one house cannot leak into a different house's run. The one exception is a cloud job with no `.env` file at all, which simply gets every value from the environment (its repository secrets), exactly as before.
 
 ## Wiring up a house
 
 1. Create the house's folder anywhere you like (it does not need to live near this tool).
-2. Add a `.env` file there with `METRICS_DATA_DIR`, `METRICS_SCRIPTS_DIR`, and `METRICS_REACH_JOB_NAME` set (and `YT_CHANNEL_ID` / `YOUTUBE_API_KEY` if you want the published-video list).
+2. Add a `.env` file there with `METRICS_DATA_DIR`, `METRICS_SCRIPTS_DIR`, `METRICS_REACH_JOB_NAME`, and `YT_CHANNEL_ID` set (and `YOUTUBE_API_KEY` too if you want the published-video list).
 3. Download the OAuth "Desktop app" client secret from Google Cloud and save it at `secrets/client_secret.json` inside the house folder (or point `YT_OAUTH_CLIENT_SECRET` at wherever you saved it).
 4. Point this tool at the house folder - either set `METRICS_HOUSE` to its full path before running, or pass the path in directly if you are calling this from code.
 5. Run `python3 metrics.py setup-reach-job` once, early - impressions and click-through rate only start accruing from the moment this job is created; they never backfill.
@@ -53,12 +55,13 @@ There is deliberately no shared fallback location for any of these - a shared de
 
 ## Safety checks
 
-Because this tool is shared, it also checks that the saved sign-in it is about to use is really for the channel this house says it is:
+Because this tool is shared, every house must set `YT_CHANNEL_ID`, and the tool uses it to check that the saved sign-in it is about to use is really for that channel:
 
-- Every real API call is addressed to this house's own channel id (when `YT_CHANNEL_ID` is set), not just "whichever account this sign-in happens to be for". A sign-in for the wrong channel gets refused by YouTube rather than quietly handing back someone else's numbers.
-- Before writing anything at all, `pull` also makes one small check call and cross-checks the channel id already recorded in this house's own saved reach reports. If either check finds the sign-in does not match this house's channel id, the run stops immediately, nothing is written, and a plain-English message explains what to fix (delete the saved sign-in and sign in again as the right account).
+- Every real API call is addressed to this house's own channel id, never just "whichever account this sign-in happens to be for". A sign-in for the wrong channel gets refused by YouTube rather than quietly handing back someone else's numbers.
+- Before writing anything at all (or, for `setup-reach-job`, before creating anything), the tool also makes one small check call and cross-checks the channel id already recorded in this house's own saved reach reports. If either check finds the sign-in does not match this house's channel id, the run stops immediately, nothing is written or created, and a plain-English message explains what to fix (delete the saved sign-in and sign in again as the right account - or, if the sign-in really is right, check the channel's API access and permissions).
+- If the small check call cannot reach YouTube at all (for any reason other than a flat refusal), that is reported in one line and the tool falls back to the saved-reach-report cross-check above rather than failing the whole run over a blip.
 
-A house that has not set `YT_CHANNEL_ID` yet cannot run these checks (there is nothing to compare against) - that is a normal, unfinished-setup state, not a failure, and it does not turn the run red.
+A house that has not set `YT_CHANNEL_ID` cannot run this tool at all - see the settings table above.
 
 ## Credentials
 
