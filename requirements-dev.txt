@@ -1,2 +1,6 @@
 # Dev/test-only dependency: this is the CI test gate (daily-metrics.yml runs `python -m pytest -q` before any credential is written to disk).
 pytest==9.0.3
+# Dev/test-only: tests/test_wall_seal.py imports the workspace's shared wall/seal.py guard
+# (docs/adr/0003, check 1 - Code stays blind) directly, and that module needs PyYAML to
+# read wall/code_seal.yaml. Never imported by the tool itself at runtime.
+PyYAML==6.0.3
