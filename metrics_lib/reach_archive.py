@@ -45,7 +45,7 @@ _DAY_FILE_GLOB = "*.csv"
 _FIRST_INGEST_SAMPLE_CAP = 3
 
 
-def gather_reach_rows(client, archive_dir, printer=print) -> list:
+def gather_reach_rows(client, archive_dir, name, printer=print) -> list:
     """Ensure the reach job exists, archive any new/updated daily reports
     under archive_dir, then return the COMBINED per-video-per-day rows parsed
     from the FULL local archive - not just the reports downloaded this run.
@@ -53,13 +53,16 @@ def gather_reach_rows(client, archive_dir, printer=print) -> list:
     client: a ReportingClient (or anything exposing its ensure_reach_job,
     list_reports, and download_report_text methods).
     archive_dir: pathlib.Path to archive into; created if missing.
+    name: this house's reach-report job name (Config.reach_job_name) - required,
+    since ensure_reach_job takes no default (see metrics_lib.reporting).
     printer: where plain-English warnings/diagnostics go (default print).
     Never receives a token, header, or URL - only day keys and CSV values
     already downloaded to local disk.
 
     Returns rows in exactly the shape metrics.py's old _gather_reach_rows
     returned ({"date", "video_id", "impressions", "ctr"} per row, ctr as a
-    percent), so it is a drop-in replacement at the call site.
+    percent, plus "channel_id" when the archived CSV carried that column), so
+    it is a drop-in replacement at the call site.
     """
     archive_dir = Path(archive_dir)
     archive_dir.mkdir(parents=True, exist_ok=True)
@@ -68,7 +71,7 @@ def gather_reach_rows(client, archive_dir, printer=print) -> list:
     ledger_was_empty_at_start = not ledger
     first_ingest_shown = False
 
-    job_id = client.ensure_reach_job(printer=printer)
+    job_id = client.ensure_reach_job(name, printer=printer)
     for report in client.list_reports(job_id):
         download_url = report.get("downloadUrl")
         day = _day_key(report.get("startTime"))
@@ -98,6 +101,17 @@ def gather_reach_rows(client, archive_dir, printer=print) -> list:
             first_ingest_shown = True
 
     return _parse_archive(archive_dir)
+
+
+def read_archived_reach_rows(archive_dir) -> list:
+    """Read every row already archived locally, without touching the network.
+
+    Used by metrics.py's channel-identity guard (Net B, the cross-check half): that
+    check must still work even when the live API cannot be reached at all, so it
+    reads only what is already saved to disk in archive_dir - the same files
+    gather_reach_rows above keeps up to date on every successful run.
+    """
+    return _parse_archive(Path(archive_dir))
 
 
 def _parse_archive(archive_dir: Path) -> list:

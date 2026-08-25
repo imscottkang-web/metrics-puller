@@ -37,6 +37,11 @@ COL_IMPRESSIONS = "video_thumbnail_impressions"
 COL_CTR = "video_thumbnail_impressions_ctr"
 _REQUIRED_COLUMNS = (COL_DATE, COL_VIDEO_ID, COL_IMPRESSIONS, COL_CTR)
 
+# channel_id is NOT required (older archived days may not have it), but when present it is
+# carried through to each row - metrics.py's channel-identity guard cross-checks it against
+# the house's own configured channel id, as a check that still works with no live API call.
+COL_CHANNEL_ID = "channel_id"
+
 # A CTR (as a percent) above this is not a real click-through rate - it means
 # the source ratio-to-percent assumption above is wrong, most likely because
 # the API already returned a percent rather than a 0..1 ratio.
@@ -101,6 +106,7 @@ def parse_reach_csv(text: str) -> list:
                 "metrics_lib/reporting.py",
             )
 
+    has_channel_id = COL_CHANNEL_ID in fieldnames
     rows = []
     for record in reader:
         percent = ctr_ratio_to_percent(float(record[COL_CTR]))
@@ -111,14 +117,15 @@ def parse_reach_csv(text: str) -> list:
                 "(converting it as a ratio produced a value over 100%); refusing to write "
                 "incorrect data",
             )
-        rows.append(
-            {
-                "date": record[COL_DATE],
-                "video_id": record[COL_VIDEO_ID],
-                "impressions": int(record[COL_IMPRESSIONS]),
-                "ctr": percent,
-            }
-        )
+        row = {
+            "date": record[COL_DATE],
+            "video_id": record[COL_VIDEO_ID],
+            "impressions": int(record[COL_IMPRESSIONS]),
+            "ctr": percent,
+        }
+        if has_channel_id:
+            row["channel_id"] = record.get(COL_CHANNEL_ID)
+        rows.append(row)
     return rows
 
 
@@ -145,8 +152,13 @@ class ReportingClient:
     def __init__(self, transport) -> None:
         self._transport = transport
 
-    def ensure_reach_job(self, name: str = "five-and-dime reach", printer=print) -> str:
+    def ensure_reach_job(self, name: str, printer=print) -> str:
         """Return the id of the channel_reach_basic_a1 job, creating it once.
+
+        name is required and never defaulted - this tool is shared by more than one
+        channel, and a shared default job name would make one house's job
+        indistinguishable from another's in the API console. Callers supply the
+        house's own Config.reach_job_name.
 
         Idempotent: if a job of this report type already exists, its id is
         returned and no POST is made. This is what serves "create the reach

@@ -15,11 +15,37 @@ injected clients so they are testable with fakes; main() builds the real
 read-only clients. This module never handles the token itself - only the
 Transport does - so nothing here can print or log a secret.
 
+Channel-identity guard (the thing this must never let happen): this tool is
+shared by more than one YouTube channel ("house"). Each house is handed its
+own house_dir (see metrics_lib.config), and that separation - one house, one
+folder, one saved sign-in file - is the PRIMARY defence against a house
+running with the wrong channel's numbers. run_pull adds a second net for the
+day that primary defence is somehow bypassed anyway (e.g. a token file
+copied by hand into the wrong house's secrets/ folder): before anything is
+read for real or written to the CSV, it checks that the saved sign-in
+actually belongs to the channel this house was configured with
+(Config.channel_id). Two independent checks, because either alone can miss
+a mismatch:
+  - Net A: every real Analytics API call already asks for this house's
+    specific channel id (see metrics_lib.analytics.AnalyticsClient), not
+    just "whichever channel this token happens to be signed in as" - so a
+    wrong token gets refused by YouTube (403) instead of happily returning
+    someone else's numbers.
+  - Net B: a preflight in run_pull makes one cheap probe call and, when that
+    is not conclusive (e.g. the API cannot be reached), also cross-checks
+    the channel id already recorded in this house's own locally archived
+    reach reports. Either check failing raises ChannelMismatch, which stops
+    the run before any row is written.
+A house with no channel_id configured yet cannot run either check (there is
+nothing to compare against) - that is a setup state, not a failure, and
+must not turn the run red.
+
 Exit codes (returned by dispatch(), and therefore by main()):
   0  ok - everything requested completed with no failures or warnings.
   1  unknown command, or an unexpected internal error (reported as one plain
      "Unexpected error: <type>: <message>" line, never a raw traceback).
-  2  auth/credential problem (ReauthRequired or CredentialFileError) - a
+  2  auth/credential problem (ReauthRequired, CredentialFileError, or
+     ChannelMismatch - the saved sign-in is not for this house's channel) - a
      plain-English fix is printed; never a raw traceback.
   3  a top-level API failure - a MetricsApiError that stopped the whole
      command (e.g. setup-reach-job could not reach the API), so nothing could
@@ -51,7 +77,7 @@ from metrics_lib import snapshots as snapshots_mod
 from metrics_lib import uploads as uploads_mod
 from metrics_lib.analytics import AnalyticsClient
 from metrics_lib.auth import CredentialFileError, OAuthTokenProvider, ReauthRequired
-from metrics_lib.config import load_config
+from metrics_lib.config import Config, HouseNotConfigured, MissingSetting, load_config
 from metrics_lib.http import ApiKeyTransport, MetricsApiError, Transport
 from metrics_lib.reporting import ReportingClient
 
@@ -60,8 +86,72 @@ from metrics_lib.reporting import ReportingClient
 DEFAULT_START_DATE = "2005-01-01"
 
 
-def run_setup_reach_job(reporting_client, name="five-and-dime reach", *, printer=print):
-    """Create (once, idempotently) the reach-report job; return its id."""
+class ChannelMismatch(Exception):
+    """The saved sign-in is not for the channel this house was configured with.
+
+    See the module docstring's "Channel-identity guard" section for the two checks
+    that raise this. str() names Config.channel_id, Config.house_dir, and
+    Config.token_path (the PATH only, never file contents) and the fix: delete the
+    saved sign-in and sign in again as the right account.
+    """
+
+
+def _channel_mismatch_message(config: Config) -> str:
+    return (
+        "This saved sign-in does not look like it belongs to the YouTube channel this "
+        f"house was configured with (channel id {config.channel_id}). Refusing to pull "
+        "any numbers with it - continuing could record another channel's numbers under "
+        "this house's name, or mean two houses are sharing one sign-in without anyone "
+        "noticing. Nothing was written this run. "
+        f"Fix: delete the saved sign-in file at {config.token_path} and run this tool "
+        f"locally for the house at {config.house_dir} to sign in again, making sure to "
+        "pick the right channel's account when the browser asks."
+    )
+
+
+def _check_channel_identity(config: Config, analytics_client, *, today, out=print) -> None:
+    """Net A is the shape of every real Analytics call (see AnalyticsClient); this is
+    Net B - a preflight, run before anything else in run_pull, so a mismatch is caught
+    before any row is written rather than partway through the per-video loop.
+
+    Two independent checks, because either one alone can miss a mismatch:
+      - a live probe call, targeted at config.channel_id; a 403 means the token is for
+        a different channel;
+      - the channel id already recorded in this house's own locally archived reach
+        reports (metrics_lib.reach_archive.read_archived_reach_rows) - this one keeps
+        working even when the API cannot be reached at all.
+    Neither check can run without a configured channel_id (there is nothing to compare
+    against), so that case prints one line and does nothing further: a house that has
+    not set one up yet is a setup state, not a failure, and must not turn the run red.
+    """
+    if config.channel_id is None:
+        out(
+            "Could not check the saved sign-in against a channel id, because no "
+            "channel id is configured for this house. Skipping this check; every "
+            "number below is unaffected."
+        )
+        return
+
+    try:
+        analytics_client.probe_channel(today.isoformat())
+    except MetricsApiError as exc:
+        if exc.status == 403:
+            raise ChannelMismatch(_channel_mismatch_message(config)) from None
+        raise
+
+    archived_rows = reach_archive_mod.read_archived_reach_rows(config.reach_reports_dir)
+    seen_channels = {row["channel_id"] for row in archived_rows if row.get("channel_id")}
+    if seen_channels and config.channel_id not in seen_channels:
+        raise ChannelMismatch(_channel_mismatch_message(config))
+
+
+def run_setup_reach_job(reporting_client, name, *, printer=print):
+    """Create (once, idempotently) the reach-report job; return its id.
+
+    name is required (no default): this tool is shared by more than one channel, and
+    a shared default job name is exactly the kind of collision this build removes.
+    Callers pass the house's own Config.reach_job_name.
+    """
     return reporting_client.ensure_reach_job(name, printer=printer)
 
 
@@ -244,6 +334,8 @@ def run_pull(config, reporting_client, analytics_client, *, today, start_date=DE
     "reach_failure" (str or None), "uploads_failure" (str or None - the
     channel's published-video list could not be read this run)}.
     """
+    _check_channel_identity(config, analytics_client, today=today, out=out)
+
     registry_result = registry_mod.read_registry(config.scripts_dir)
     entries = registry_result.entries
     registry_notes = list(registry_result.notes)
@@ -270,7 +362,8 @@ def run_pull(config, reporting_client, analytics_client, *, today, start_date=DE
     reach_rows = []
     reach_failure = None
     try:
-        reach_rows = reach_archive_mod.gather_reach_rows(reporting_client, config.reach_reports_dir, printer=out)
+        reach_rows = reach_archive_mod.gather_reach_rows(
+            reporting_client, config.reach_reports_dir, config.reach_job_name, printer=out)
     except MetricsApiError as exc:
         # Degrade, do not erase the day: views/retention/traffic can still be
         # recorded for every due video, and a missed 24h milestone window
@@ -337,7 +430,7 @@ def dispatch(command, *, config, reporting_client, analytics_client, today, out=
     """
     try:
         if command == "setup-reach-job":
-            job_id = run_setup_reach_job(reporting_client, printer=out)
+            job_id = run_setup_reach_job(reporting_client, config.reach_job_name, printer=out)
             out(f"Reach-report job ready (id: {job_id}).")
             out("Impressions and click-through rate start accruing from now; they do not backfill.")
             return 0
@@ -358,7 +451,7 @@ def dispatch(command, *, config, reporting_client, analytics_client, today, out=
             return 0
         out(f"Unknown command: {command}")
         return 1
-    except (ReauthRequired, CredentialFileError) as exc:
+    except (ReauthRequired, CredentialFileError, ChannelMismatch) as exc:
         out(str(exc))
         return 2
     except MetricsApiError as exc:
@@ -388,7 +481,7 @@ def build_clients(config):
     if config.api_key and config.channel_id:
         uploads_client = uploads_mod.UploadsClient(
             ApiKeyTransport(config.api_key, timeout=config.timeout))
-    return ReportingClient(transport), AnalyticsClient(transport), uploads_client
+    return ReportingClient(transport), AnalyticsClient(transport, config.channel_id), uploads_client
 
 
 def main(argv=None):
@@ -398,7 +491,15 @@ def main(argv=None):
     sub.add_parser("pull", help="Append one snapshot row per project video to weekly_snapshots.csv.")
     args = parser.parse_args(argv)
 
-    config = load_config()
+    try:
+        config = load_config()
+    except (HouseNotConfigured, MissingSetting) as exc:
+        # Same family as the auth/credential refusals dispatch() handles below: this
+        # tool cannot even start without knowing which house it is running as, so it
+        # is caught here (before dispatch(), which needs a Config to run at all) and
+        # printed the same plain-English way - never a raw traceback.
+        print(str(exc))
+        return 2
     reporting_client, analytics_client, uploads_client = build_clients(config)
     return dispatch(
         args.command,

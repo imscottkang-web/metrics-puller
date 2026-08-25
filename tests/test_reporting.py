@@ -94,6 +94,7 @@ class FakeTransport:
 
 
 JOBS_URL = f"{ReportingClient.BASE}/jobs"
+JOB_NAME = "Anchor and Ivy reach"  # sanctioned fake; this tool names no real business
 
 
 def test_ensure_reach_job_is_idempotent_when_job_exists(load_fixture):
@@ -101,7 +102,7 @@ def test_ensure_reach_job_is_idempotent_when_job_exists(load_fixture):
     transport = FakeTransport(get_responses={JOBS_URL: jobs})
     client = ReportingClient(transport)
 
-    job_id = client.ensure_reach_job()
+    job_id = client.ensure_reach_job(JOB_NAME)
 
     assert job_id == "job-abc"
     assert transport.post_calls == []
@@ -122,7 +123,7 @@ def test_ensure_reach_job_finds_existing_job_on_second_page():
     transport = FakeTransport(get_responses={JOBS_URL: pages})
     client = ReportingClient(transport)
 
-    job_id = client.ensure_reach_job()
+    job_id = client.ensure_reach_job(JOB_NAME)
 
     assert job_id == "job-abc"
     assert transport.post_calls == []
@@ -139,11 +140,11 @@ def test_ensure_reach_job_creates_job_when_none_exists():
     )
     client = ReportingClient(transport)
 
-    job_id = client.ensure_reach_job()
+    job_id = client.ensure_reach_job(JOB_NAME)
 
     assert job_id == "job-new"
     assert transport.post_calls == [
-        (JOBS_URL, {"reportTypeId": "channel_reach_basic_a1", "name": "five-and-dime reach"})
+        (JOBS_URL, {"reportTypeId": "channel_reach_basic_a1", "name": JOB_NAME})
     ]
 
 
@@ -154,7 +155,7 @@ def test_ensure_reach_job_treats_missing_jobs_key_as_empty():
     )
     client = ReportingClient(transport)
 
-    assert client.ensure_reach_job() == "job-new2"
+    assert client.ensure_reach_job(JOB_NAME) == "job-new2"
 
 
 def test_list_reports_returns_parsed_reports(load_fixture):
@@ -204,10 +205,16 @@ def test_fetch_reach_rows_parses_scrambled_csv(load_fixture):
 
     rows = client.fetch_reach_rows(download_url)
 
+    # This fixture's CSV carries a channel_id column (see the fixture file), which the
+    # channel-identity guard's local cross-check (metrics.py's _check_channel_identity)
+    # relies on - so it must survive parsing, not just the four original columns.
     assert rows == [
-        {"date": "2026-07-01", "video_id": "vid001", "impressions": 1000, "ctr": 4.8},
-        {"date": "2026-07-01", "video_id": "vid002", "impressions": 850, "ctr": 5.12},
-        {"date": "2026-07-02", "video_id": "vid001", "impressions": 1100, "ctr": 5.0},
+        {"date": "2026-07-01", "video_id": "vid001", "impressions": 1000, "ctr": 4.8,
+         "channel_id": "UC_fake_channel"},
+        {"date": "2026-07-01", "video_id": "vid002", "impressions": 850, "ctr": 5.12,
+         "channel_id": "UC_fake_channel"},
+        {"date": "2026-07-02", "video_id": "vid001", "impressions": 1100, "ctr": 5.0,
+         "channel_id": "UC_fake_channel"},
     ]
     assert transport.get_bytes_calls == [download_url]
 
@@ -258,7 +265,7 @@ def test_transport_error_propagates_from_ensure_reach_job():
     client = ReportingClient(transport)
 
     with pytest.raises(MetricsApiError):
-        client.ensure_reach_job()
+        client.ensure_reach_job(JOB_NAME)
 
 
 # --- defect 2: gzip-compressed report bodies must not crash the decoder ---
@@ -386,7 +393,7 @@ def test_ensure_reach_job_warns_and_keeps_oldest_on_race_created_duplicate():
     client = ReportingClient(transport)
     warnings = []
 
-    job_id = client.ensure_reach_job(printer=warnings.append)
+    job_id = client.ensure_reach_job(JOB_NAME, printer=warnings.append)
 
     assert job_id == "job-theirs"  # the older of the two, not the one just created
     assert len(warnings) == 1
@@ -407,7 +414,7 @@ def test_ensure_reach_job_no_warning_when_only_one_job_exists_after_create():
     client = ReportingClient(transport)
     warnings = []
 
-    job_id = client.ensure_reach_job(printer=warnings.append)
+    job_id = client.ensure_reach_job(JOB_NAME, printer=warnings.append)
 
     assert job_id == "job-new"
     assert warnings == []
@@ -428,6 +435,26 @@ def test_ensure_reach_job_never_issues_a_delete_call():
     )
     client = ReportingClient(transport)
 
-    client.ensure_reach_job(printer=lambda _msg: None)
+    client.ensure_reach_job(JOB_NAME, printer=lambda _msg: None)
 
     assert not hasattr(transport, "delete_calls")
+
+
+# --- channel-identity guard support: channel_id is optional on parse -------
+
+def test_parse_reach_csv_omits_channel_id_key_when_column_absent():
+    # Older archived days (or any report body without the column) keep the exact
+    # same 4-key row shape as before - the channel-identity cross-check treats a
+    # missing key as "nothing to compare", never as a crash.
+    download_url = "https://reports.example/nochannel"
+    csv_text = (
+        "date,video_id,video_thumbnail_impressions,video_thumbnail_impressions_ctr\n"
+        "2026-07-01,vid001,1000,0.048\n"
+    )
+    transport = FakeTransport(bytes_responses={download_url: csv_text.encode("utf-8")})
+    client = ReportingClient(transport)
+
+    rows = client.fetch_reach_rows(download_url)
+
+    assert rows == [{"date": "2026-07-01", "video_id": "vid001", "impressions": 1000, "ctr": 4.8}]
+    assert "channel_id" not in rows[0]

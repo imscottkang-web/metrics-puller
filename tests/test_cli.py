@@ -20,6 +20,9 @@ from metrics_lib.auth import REAUTH_MESSAGE, CredentialFileError, ReauthRequired
 from metrics_lib.config import Config
 from metrics_lib.http import MetricsApiError
 
+JOB_NAME = "Anchor and Ivy reach"  # sanctioned fake job name; this tool names no real business
+CHANNEL_ID = "UCanchorandivydatafake"  # sanctioned fake channel id
+
 
 class FakeReporting:
     """A minimal reporting-client double.
@@ -38,8 +41,9 @@ class FakeReporting:
         self.raise_api_error = raise_api_error
         self.ensure_calls = 0
 
-    def ensure_reach_job(self, name="five-and-dime reach", printer=print):
+    def ensure_reach_job(self, name, printer=print):
         self.ensure_calls += 1
+        self.ensure_reach_job_name = name
         if self.raise_reauth:
             raise ReauthRequired(REAUTH_MESSAGE)
         if self.raise_api_error:
@@ -48,7 +52,8 @@ class FakeReporting:
 
 
 class FakeAnalytics:
-    def __init__(self, core=None, traffic=None, curve=None, fail_video_id=None, fail_exc=None):
+    def __init__(self, core=None, traffic=None, curve=None, fail_video_id=None, fail_exc=None,
+                 probe_exc=None):
         self.core = core if core is not None else {"views": 1200, "avg_view_duration_sec": 210}
         self.traffic = traffic if traffic is not None else {"browse": 55.0, "search": 30.0, "suggested": 10.0}
         self.curve = curve if curve is not None else [
@@ -59,6 +64,15 @@ class FakeAnalytics:
         # tests can exercise per-video error isolation without a real API.
         self.fail_video_id = fail_video_id
         self.fail_exc = fail_exc if fail_exc is not None else MetricsApiError(500, "backend blip")
+        # When set, probe_channel (the channel-identity preflight) raises this instead
+        # of succeeding - how tests drive the two-net ChannelMismatch guard.
+        self.probe_exc = probe_exc
+        self.probe_calls = []
+
+    def probe_channel(self, on_date):
+        self.probe_calls.append(on_date)
+        if self.probe_exc:
+            raise self.probe_exc
 
     def core_metrics(self, vid, start, end):
         if vid == self.fail_video_id:
@@ -82,19 +96,29 @@ def _no_reach_rows_by_default(monkeypatch):
     to empty and a test that cares about specific numbers overrides it (see
     _patch_reach_rows).
     """
-    monkeypatch.setattr(cli.reach_archive_mod, "gather_reach_rows", lambda client, archive_dir, printer=print: [])
+    monkeypatch.setattr(cli.reach_archive_mod, "gather_reach_rows",
+                         lambda client, archive_dir, name, printer=print: [])
 
 
 def _patch_reach_rows(monkeypatch, rows):
     monkeypatch.setattr(
-        cli.reach_archive_mod, "gather_reach_rows", lambda client, archive_dir, printer=print: list(rows)
+        cli.reach_archive_mod, "gather_reach_rows",
+        lambda client, archive_dir, name, printer=print: list(rows)
     )
 
 
-def _config(tmp_path):
-    root = tmp_path / "second-brain" / "tools" / "metrics"
-    root.mkdir(parents=True)
-    return Config(root=root, client_secret_path=root / "secrets" / "cs.json", token_path=root / "secrets" / "token.json")
+def _config(tmp_path, **extra):
+    house_dir = tmp_path / "house"
+    house_dir.mkdir(parents=True)
+    return Config(
+        house_dir=house_dir,
+        client_secret_path=house_dir / "secrets" / "cs.json",
+        token_path=house_dir / "secrets" / "token.json",
+        data_dir=house_dir / "data",
+        scripts_dir=house_dir / "scripts",
+        reach_job_name=JOB_NAME,
+        **extra,
+    )
 
 
 def _write_bet_card(config, slug, video_id, date_str="2026-07-05", fmt="longform"):
@@ -362,7 +386,7 @@ def test_dispatch_credential_file_error_exits_2(tmp_path):
     config = _config(tmp_path)
     reporting = FakeReporting()
 
-    def boom(name="five-and-dime reach", printer=print):
+    def boom(name, printer=print):
         raise CredentialFileError("client_secret.json is missing - see runbooks/metrics-api-setup.md")
 
     reporting.ensure_reach_job = boom
@@ -379,7 +403,7 @@ def test_dispatch_credential_file_error_exits_2(tmp_path):
 # retention/traffic still recorded, impressions/ctr blank, exit 4) instead of
 # erasing the whole day with exit 3 - a missed 24h milestone is permanent.
 
-def _reach_gather_boom(client, archive_dir, printer=print):
+def _reach_gather_boom(client, archive_dir, name, printer=print):
     raise MetricsApiError(500, "reach backend down")
 
 
@@ -495,14 +519,134 @@ def test_run_pull_calls_reach_archive_with_config_dir_and_printer(tmp_path, monk
     _write_bet_card(config, "seller-repairs", "vidREAL01")
     calls = []
 
-    def fake_gather(client, archive_dir, printer=print):
-        calls.append((archive_dir, printer))
+    def fake_gather(client, archive_dir, name, printer=print):
+        calls.append((archive_dir, name, printer))
         return []
 
     monkeypatch.setattr(cli.reach_archive_mod, "gather_reach_rows", fake_gather)
     out = []
     cli.run_pull(config, FakeReporting(), FakeAnalytics(), today=date(2026, 7, 12), out=out.append)
     assert len(calls) == 1
-    archive_dir, printer = calls[0]
+    archive_dir, name, printer = calls[0]
     assert archive_dir == config.reach_reports_dir
+    assert name == config.reach_job_name
     assert printer == out.append  # bound methods compare equal even though `is` would not
+
+
+# --- channel-identity guard: a saved sign-in that is not this house's --------
+# (see metrics.py's module docstring for the full two-net picture; this is the
+# single failure the whole build exists to rule out - two houses sharing one
+# saved sign-in file, silently pulling the wrong channel's numbers)
+
+
+def _archive_reach_channel_row(config, day, channel_id, video_id="vidREAL01"):
+    config.reach_reports_dir.mkdir(parents=True, exist_ok=True)
+    (config.reach_reports_dir / f"{day}.csv").write_text(
+        "date,video_id,video_thumbnail_impressions,video_thumbnail_impressions_ctr,channel_id\n"
+        f"2026-07-0{day[-1]},{video_id},1000,0.048,{channel_id}\n",
+        encoding="utf-8",
+    )
+
+
+def test_no_channel_id_configured_skips_the_check_and_stays_green(tmp_path):
+    # A house that has not set YT_CHANNEL_ID up yet is a setup state, not a
+    # failure - this must never turn an already-green daily job red.
+    config = _config(tmp_path)  # channel_id defaults to None
+    assert config.channel_id is None
+    analytics = FakeAnalytics()
+    out = []
+
+    rc = cli.dispatch(
+        "pull", config=config, reporting_client=FakeReporting(), analytics_client=analytics,
+        today=date(2026, 7, 12), out=out.append,
+    )
+
+    assert rc == 0
+    assert analytics.probe_calls == []  # never even attempted
+    assert any("no channel id is configured" in line for line in out)
+
+
+def test_matching_channel_id_lets_the_pull_proceed(tmp_path):
+    config = _config(tmp_path, channel_id=CHANNEL_ID)
+    _write_bet_card(config, "seller-repairs", "vidREAL01")
+    _archive_reach_channel_row(config, "20260701", CHANNEL_ID)
+    analytics = FakeAnalytics()
+
+    summary = cli.run_pull(config, FakeReporting(), analytics, today=date(2026, 7, 12))
+
+    assert summary["appended"] == 1
+    assert analytics.probe_calls == ["2026-07-12"]
+
+
+def test_probe_call_403_raises_channel_mismatch_before_any_row_written(tmp_path):
+    config = _config(tmp_path, channel_id=CHANNEL_ID)
+    _write_bet_card(config, "seller-repairs", "vidREAL01")
+    analytics = FakeAnalytics(probe_exc=MetricsApiError(403, "insufficient permission"))
+
+    with pytest.raises(cli.ChannelMismatch) as excinfo:
+        cli.run_pull(config, FakeReporting(), analytics, today=date(2026, 7, 12))
+
+    message = str(excinfo.value)
+    assert CHANNEL_ID in message
+    assert str(config.house_dir) in message
+    assert str(config.token_path) in message
+    assert not config.snapshots_csv.exists()
+    assert not config.published_videos_json.exists()  # nothing written at all, not even this
+
+
+def test_dispatch_channel_mismatch_from_probe_exits_2_no_traceback(tmp_path):
+    config = _config(tmp_path, channel_id=CHANNEL_ID)
+    _write_bet_card(config, "seller-repairs", "vidREAL01")
+    analytics = FakeAnalytics(probe_exc=MetricsApiError(403, "insufficient permission"))
+    out = []
+
+    rc = cli.dispatch(
+        "pull", config=config, reporting_client=FakeReporting(), analytics_client=analytics,
+        today=date(2026, 7, 12), out=out.append,
+    )
+
+    assert rc == 2
+    assert any(CHANNEL_ID in line for line in out)
+
+
+def test_probe_call_non_403_is_not_treated_as_a_mismatch(tmp_path):
+    # Only a 403 is evidence of a wrong channel; any other API problem is a normal
+    # top-level failure (exit 3), not this guard's business.
+    config = _config(tmp_path, channel_id=CHANNEL_ID)
+    _write_bet_card(config, "seller-repairs", "vidREAL01")
+    analytics = FakeAnalytics(probe_exc=MetricsApiError(500, "backend blip"))
+    out = []
+
+    rc = cli.dispatch(
+        "pull", config=config, reporting_client=FakeReporting(), analytics_client=analytics,
+        today=date(2026, 7, 12), out=out.append,
+    )
+
+    assert rc == 3
+    assert not config.snapshots_csv.exists()
+
+
+def test_archived_reach_rows_naming_a_different_channel_raises_mismatch(tmp_path):
+    # Net B's second half: works even though the probe call itself succeeded (or was
+    # never reachable) - the local archive alone is enough to catch the mix-up.
+    config = _config(tmp_path, channel_id=CHANNEL_ID)
+    _write_bet_card(config, "seller-repairs", "vidREAL01")
+    _archive_reach_channel_row(config, "20260701", "UC_some_other_channel_entirely")
+    analytics = FakeAnalytics()  # probe succeeds
+
+    with pytest.raises(cli.ChannelMismatch):
+        cli.run_pull(config, FakeReporting(), analytics, today=date(2026, 7, 12))
+
+    assert not config.snapshots_csv.exists()
+
+
+def test_no_archived_reach_rows_yet_is_not_a_mismatch(tmp_path):
+    # A brand-new house with nothing archived yet has nothing to cross-check against -
+    # that must not be mistaken for a mismatch.
+    config = _config(tmp_path, channel_id=CHANNEL_ID)
+    _write_bet_card(config, "seller-repairs", "vidREAL01")
+    analytics = FakeAnalytics()
+
+    summary = cli.run_pull(config, FakeReporting(), analytics, today=date(2026, 7, 12))
+
+    assert summary["appended"] == 1

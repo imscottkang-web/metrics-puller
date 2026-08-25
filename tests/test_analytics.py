@@ -223,3 +223,96 @@ def test_traffic_mix_sends_expected_params(load_fixture):
 
 def test_client_base_url_constant():
     assert AnalyticsClient.BASE == BASE
+
+
+# ---- channel-identity guard, Net A: channel_id targets every call -----------
+# (see metrics.py's module docstring for the full two-net picture)
+
+CHANNEL_ID = "UCanchorandivydatafake"
+
+
+def test_no_channel_id_sends_channel_equals_mine(load_fixture):
+    # A house that has not configured a channel id yet keeps today's exact
+    # behaviour - this must never turn an already-green daily job red.
+    transport = FakeTransport(load_fixture("analytics_core.json"))
+    client = AnalyticsClient(transport)
+
+    client.core_metrics("vid123", "2026-01-01", "2026-07-01")
+
+    assert transport.calls[0]["params"]["ids"] == "channel==MINE"
+
+
+def test_channel_id_targets_core_metrics(load_fixture):
+    transport = FakeTransport(load_fixture("analytics_core.json"))
+    client = AnalyticsClient(transport, channel_id=CHANNEL_ID)
+
+    client.core_metrics("vid123", "2026-01-01", "2026-07-01")
+
+    assert transport.calls[0]["params"]["ids"] == f"channel=={CHANNEL_ID}"
+
+
+def test_channel_id_targets_retention_curve(load_fixture):
+    transport = FakeTransport(load_fixture("analytics_retention.json"))
+    client = AnalyticsClient(transport, channel_id=CHANNEL_ID)
+
+    client.retention_curve("vid123", "2026-01-01", "2026-07-01")
+
+    assert transport.calls[0]["params"]["ids"] == f"channel=={CHANNEL_ID}"
+
+
+def test_channel_id_targets_traffic_mix(load_fixture):
+    transport = FakeTransport(load_fixture("analytics_traffic.json"))
+    client = AnalyticsClient(transport, channel_id=CHANNEL_ID)
+
+    client.traffic_mix("vid123", "2026-01-01", "2026-07-01")
+
+    assert transport.calls[0]["params"]["ids"] == f"channel=={CHANNEL_ID}"
+
+
+def test_wrong_channel_id_gets_refused_with_403(load_fixture):
+    # This is exactly the shape a mismatched saved sign-in produces: YouTube
+    # refuses rather than happily returning some other channel's numbers.
+    client = AnalyticsClient(RaisingTransport(MetricsApiError(403, "insufficient permission")),
+                              channel_id=CHANNEL_ID)
+
+    with pytest.raises(MetricsApiError) as excinfo:
+        client.core_metrics("vid123", "2026-01-01", "2026-07-01")
+    assert excinfo.value.status == 403
+
+
+# ---- probe_channel: the cheap preflight call (Net B's live half) ------------
+
+
+def test_probe_channel_sends_a_minimal_one_day_channel_query():
+    transport = FakeTransport({"columnHeaders": [], "rows": []})
+    client = AnalyticsClient(transport, channel_id=CHANNEL_ID)
+
+    client.probe_channel("2026-08-25")
+
+    assert len(transport.calls) == 1
+    call = transport.calls[0]
+    assert call["url"] == f"{BASE}/reports"
+    params = call["params"]
+    assert params["ids"] == f"channel=={CHANNEL_ID}"
+    assert params["startDate"] == "2026-08-25"
+    assert params["endDate"] == "2026-08-25"
+    assert params["metrics"] == "views"
+    assert "filters" not in params  # no video needed - this never depends on one existing
+
+
+def test_probe_channel_with_no_channel_id_uses_channel_equals_mine():
+    transport = FakeTransport({"columnHeaders": [], "rows": []})
+    client = AnalyticsClient(transport)
+
+    client.probe_channel("2026-08-25")
+
+    assert transport.calls[0]["params"]["ids"] == "channel==MINE"
+
+
+def test_probe_channel_propagates_a_403_unchanged():
+    error = MetricsApiError(403, "insufficient permission")
+    client = AnalyticsClient(RaisingTransport(error), channel_id=CHANNEL_ID)
+
+    with pytest.raises(MetricsApiError) as excinfo:
+        client.probe_channel("2026-08-25")
+    assert excinfo.value is error

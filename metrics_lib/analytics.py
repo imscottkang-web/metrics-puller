@@ -34,12 +34,44 @@ def _rows_to_dicts(column_headers: list[dict], rows: list[list]) -> list[dict]:
 
 
 class AnalyticsClient:
-    """Read-only client for the YouTube Analytics API v2 `/reports` endpoint."""
+    """Read-only client for the YouTube Analytics API v2 `/reports` endpoint.
+
+    channel_id, when given, is sent as "channel==<id>" on every call instead of the
+    default "channel==MINE" - that is Net A of the two-net guard against a house
+    running with a sign-in that belongs to a different channel (see metrics.py's module
+    docstring for the full picture): with a wrong token, YouTube then answers 403
+    ("insufficient permission") rather than happily returning some other channel's
+    numbers. When channel_id is None (a house that has not configured one yet),
+    "channel==MINE" is used exactly as before, so a house with no channel id stays on
+    its existing, already-green behaviour.
+    """
 
     BASE = BASE
 
-    def __init__(self, transport) -> None:
+    def __init__(self, transport, channel_id: str | None = None) -> None:
         self._transport = transport
+        self._channel_id = channel_id
+
+    @property
+    def _ids(self) -> str:
+        return f"channel=={self._channel_id}" if self._channel_id else "channel==MINE"
+
+    def probe_channel(self, on_date: str) -> None:
+        """The cheapest possible call against this client's channel: total views for
+        one day, no video filter needed. Used only as a preflight identity check (Net
+        B in metrics.py's run_pull) - the return value carries no useful data and is
+        discarded; only whether this raises matters. With a mismatched channel id,
+        YouTube answers 403 and MetricsApiError is raised same as any other call.
+        """
+        self._transport.get(
+            f"{self.BASE}/reports",
+            {
+                "ids": self._ids,
+                "startDate": on_date,
+                "endDate": on_date,
+                "metrics": "views",
+            },
+        )
 
     def core_metrics(self, video_id: str, start_date: str, end_date: str) -> dict:
         """Total views and average view duration (seconds) for one video.
@@ -51,7 +83,7 @@ class AnalyticsClient:
         data = self._transport.get(
             f"{self.BASE}/reports",
             {
-                "ids": "channel==MINE",
+                "ids": self._ids,
                 "startDate": start_date,
                 "endDate": end_date,
                 "metrics": "views,averageViewDuration",
@@ -78,7 +110,7 @@ class AnalyticsClient:
         data = self._transport.get(
             f"{self.BASE}/reports",
             {
-                "ids": "channel==MINE",
+                "ids": self._ids,
                 "startDate": start_date,
                 "endDate": end_date,
                 "metrics": "audienceWatchRatio,relativeRetentionPerformance",
@@ -112,7 +144,7 @@ class AnalyticsClient:
         data = self._transport.get(
             f"{self.BASE}/reports",
             {
-                "ids": "channel==MINE",
+                "ids": self._ids,
                 "startDate": start_date,
                 "endDate": end_date,
                 "metrics": "views",

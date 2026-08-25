@@ -51,10 +51,17 @@ def _playlist_body(rows):
 
 
 def _config(tmp_path, **extra):
-    root = tmp_path / "second-brain" / "tools" / "metrics"
-    root.mkdir(parents=True)
-    return Config(root=root, client_secret_path=root / "secrets" / "cs.json",
-                  token_path=root / "secrets" / "token.json", **extra)
+    house_dir = tmp_path / "house"
+    house_dir.mkdir(parents=True)
+    return Config(
+        house_dir=house_dir,
+        client_secret_path=house_dir / "secrets" / "cs.json",
+        token_path=house_dir / "secrets" / "token.json",
+        data_dir=house_dir / "data",
+        scripts_dir=house_dir / "scripts",
+        reach_job_name="Anchor and Ivy reach",
+        **extra,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -229,13 +236,23 @@ class FakeUploads:
         return list(self.videos)
 
 
+class _NoOpAnalytics:
+    """Just enough of an analytics client for the channel-identity preflight (see
+    metrics.py's _check_channel_identity) to pass without complaint - these tests are
+    about the published-video list, not that guard, and a config with a channel_id set
+    (needed for gather_published_videos) would otherwise call probe_channel on None."""
+
+    def probe_channel(self, on_date):
+        pass
+
+
 def test_the_daily_pull_writes_the_list_even_on_a_day_no_video_is_due(tmp_path):
     """The day a video is FIRST published is exactly a day when nothing is due for it - it has
     no bet card yet, so the registry has never heard of it - and that is the one day this list
     has to be right. Written before the due check, so an early return cannot skip it."""
     config = _config(tmp_path, api_key="k", channel_id=CHANNEL_ID)
 
-    summary = cli.run_pull(config, None, None, today=date(2026, 8, 25),
+    summary = cli.run_pull(config, None, _NoOpAnalytics(), today=date(2026, 8, 25),
                            uploads_client=FakeUploads(), out=lambda *a: None)
 
     assert summary["appended"] == 0
@@ -284,7 +301,7 @@ def test_a_failed_list_makes_the_run_partial_rather_than_silent(tmp_path, monkey
     monkeypatch.setattr(cli.reach_archive_mod, "gather_reach_rows",
                         lambda client, archive_dir, printer=print: [])
 
-    code = cli.dispatch("pull", config=config, reporting_client=None, analytics_client=None,
+    code = cli.dispatch("pull", config=config, reporting_client=None, analytics_client=_NoOpAnalytics(),
                         uploads_client=FakeUploads(raise_exc=MetricsApiError(500, "blip")),
                         today=date(2026, 8, 25), out=lambda *a: None)
 
