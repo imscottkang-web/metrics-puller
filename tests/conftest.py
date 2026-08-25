@@ -51,11 +51,16 @@ def load_fixture():
 
 @pytest.fixture
 def cfg(tmp_path, monkeypatch):
-    """A Config rooted at a fresh tmp_path, with no client-secret env override.
+    """A Config rooted at a fresh tmp_path (as house_dir), with no client-secret env
+    override. The three now-required house settings are set here via the environment
+    so tests that only care about auth/paths do not each have to supply them.
 
     Imported lazily so conftest still collects before metrics_lib.config exists.
     """
     monkeypatch.delenv("YT_OAUTH_CLIENT_SECRET", raising=False)
+    monkeypatch.setenv("METRICS_DATA_DIR", "data")
+    monkeypatch.setenv("METRICS_SCRIPTS_DIR", "scripts")
+    monkeypatch.setenv("METRICS_REACH_JOB_NAME", "Anchor and Ivy reach")
     from metrics_lib.config import load_config
 
     return load_config(tmp_path)
