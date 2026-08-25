@@ -1,0 +1,9 @@
+# Part C metrics puller - dependencies.
+# Scoped to the one security-sensitive piece: obtaining and refreshing the
+# read-only OAuth token. All API data calls use the standard library (urllib).
+# Pinned to exact versions so the CI runner installs the same thing every day.
+google-auth==2.55.2
+google-auth-oauthlib==1.4.0
+# certifi is already present in this environment and is used for SSL verification
+# (same approach as the radar's yt_api). Listed for completeness.
+certifi==2026.6.17

@@ -1,0 +1,4 @@
+video_id,video_thumbnail_impressions_ctr,date,channel_id,video_thumbnail_impressions
+vid001,0.048,2026-07-01,UC_fake_channel,1000
+vid002,0.0512,2026-07-01,UC_fake_channel,850
+vid001,0.05,2026-07-02,UC_fake_channel,1100

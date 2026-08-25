@@ -1,0 +1,2 @@
+# Dev/test-only dependency: this is the CI test gate (daily-metrics.yml runs `python -m pytest -q` before any credential is written to disk).
+pytest==9.0.3

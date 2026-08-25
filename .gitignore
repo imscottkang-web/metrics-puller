@@ -1,0 +1,19 @@
+# Secrets never live in this repo. Each house keeps its own OAuth files under
+# its OWN gitignored secrets/ folder, outside this one - see README.md. This
+# tool is handed those paths from outside and never invents a shared location,
+# so one house's sign-in can never land on top of another's.
+.env
+.env.*
+!.env.example
+*.key
+secrets/
+
+# Python build artifacts
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+
+# OS cruft
+.DS_Store
+._*

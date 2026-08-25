@@ -1,0 +1,13 @@
+{
+  "kind": "youtubeAnalytics#resultTable",
+  "columnHeaders": [
+    {"name": "insightTrafficSourceType", "columnType": "DIMENSION", "dataType": "STRING"},
+    {"name": "views", "columnType": "METRIC", "dataType": "INTEGER"}
+  ],
+  "rows": [
+    ["BROWSE", 1200],
+    ["YT_SEARCH", 800],
+    ["SUGGESTED_VIDEO", 500],
+    ["EXTERNAL", 500]
+  ]
+}
