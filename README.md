@@ -1,25 +1,72 @@
-# Part C - Metrics Puller
+# Metrics puller
 
-Read-only tool that fills `../../data/metrics/weekly_snapshots.csv` from the channel's own private YouTube numbers.
+A read-only tool that fills in a channel's own weekly numbers CSV from that channel's private YouTube data.
 
-Decided 2026-07-23 (walls ticket 11): this puller is private-to-house automation on purpose - it is welded to this channel's own OAuth grant and this repo's private daily GitHub Action, so the tool stays in the house and only the generic setup runbook lives on the neutral `shared-brain/` shelf.
+This tool is shared: it can serve any number of YouTube channels, and it is never told to favor one over another.
+It does not know or store which channel it "belongs to" - every channel that uses it (we call each one a "house") hands it that house's own folder of settings and secrets, every time it runs.
+That is on purpose: if two houses ever shared one saved sign-in file, one house could quietly start pulling the wrong channel's numbers, or silently go dead, with nothing on screen saying so.
+Keeping each house in its own folder, with its own sign-in, is what rules that out.
 
-- Impressions + click-through rate (of the people shown the thumbnail, the share who clicked) come from the YouTube Reporting API reach report `channel_reach_basic_a1`, per video.
-- Views, average view duration, retention (share still watching at a point in the video), and traffic mix come from the YouTube Analytics API.
+- Impressions and click-through rate (the share of people shown the thumbnail who clicked) come from the YouTube Reporting API's reach report, per video.
+- Views, average view duration, retention (the share of viewers still watching at a point in the video), and traffic mix come from the YouTube Analytics API.
 - One read-only sign-in scope covers both: `yt-analytics.readonly`. No write access, no revenue data.
 
 ## Layout
-- `metrics_lib/` - the package (config, auth, API clients, registry, snapshot writer).
-- `metrics.py` - the command-line entrypoint (`setup-reach-job`, `pull`).
+
+- `metrics_lib/` - the package: settings, sign-in, the two API clients, the local video registry, the snapshot writer.
+- `metrics.py` - the command-line entry point (`setup-reach-job`, `pull`).
 - `tests/` - the test-first suite; no network, fake responses only.
-- `secrets/` - gitignored; holds the downloaded `client_secret.json` and the cached `token.json`. Never committed.
+
+Nothing under this folder is specific to any one channel. Everything channel-specific - secrets, saved sign-in, settings, the data files this tool writes - lives outside this folder, in the house's own folder (see below).
+
+## What a house is, and what it must set up
+
+A "house" is one channel's own folder, holding:
+
+- `.env` - that channel's settings (see the table below).
+- `secrets/` - that channel's downloaded OAuth client-secret file and its saved sign-in. Never committed; keep this folder out of version control.
+
+Every setting below is read from the environment first, then from that `.env` file, so a cloud job can pass settings in as repository secrets while a local run can just keep a `.env` file in the house folder.
+
+| Setting | Required? | What it is for |
+|---|---|---|
+| `METRICS_HOUSE` | Yes, unless the code calling this tool passes the house folder in directly | The full path to this house's own folder (the one holding `.env` and `secrets/`). There is no default - the tool refuses to run without it. |
+| `METRICS_DATA_DIR` | Yes | Where this house's weekly snapshot CSV, retention curves, reach-report archive, and published-video list get written. A relative path is resolved against the house folder; an absolute path is used as-is. |
+| `METRICS_SCRIPTS_DIR` | Yes | This house's folder of video script folders (each one holding a `bet_card.md`), which is how the tool knows which videos to record numbers for. Same relative/absolute rule as above. |
+| `METRICS_REACH_JOB_NAME` | Yes | The name given to this house's reach-report job inside the YouTube Reporting API, so this house's job can be told apart from any other house's job in the Google API console. |
+| `YT_OAUTH_CLIENT_SECRET` | No | Full path to the downloaded OAuth "Desktop app" client-secret file. If unset, the tool looks for `secrets/client_secret.json` inside the house folder. |
+| `YT_CHANNEL_ID` | No | This house's YouTube channel id. Not required to pull the numbers above, but turns on two extra things: the published-video list (see below), and the channel-identity check (see "Safety checks" below). A house that has not set this up yet is simply missing those two extras - the daily pull still runs and stays green. |
+| `YOUTUBE_API_KEY` | No | A public YouTube Data API key. Combined with `YT_CHANNEL_ID`, this lets the tool ask the channel what it has publicly posted, and write that list down for other tools to match new videos against their script folders. |
+
+If `METRICS_HOUSE` (or an equivalent path passed in directly) is missing, the tool refuses to run at all and prints a plain-English explanation of what to set.
+If any of the three required settings above is missing, the tool refuses the same way, naming exactly which setting is missing and what it is for.
+There is deliberately no shared fallback location for any of these - a shared default is exactly the mix-up this tool is built to avoid.
+
+## Wiring up a house
+
+1. Create the house's folder anywhere you like (it does not need to live near this tool).
+2. Add a `.env` file there with `METRICS_DATA_DIR`, `METRICS_SCRIPTS_DIR`, and `METRICS_REACH_JOB_NAME` set (and `YT_CHANNEL_ID` / `YOUTUBE_API_KEY` if you want the published-video list).
+3. Download the OAuth "Desktop app" client secret from Google Cloud and save it at `secrets/client_secret.json` inside the house folder (or point `YT_OAUTH_CLIENT_SECRET` at wherever you saved it).
+4. Point this tool at the house folder - either set `METRICS_HOUSE` to its full path before running, or pass the path in directly if you are calling this from code.
+5. Run `python3 metrics.py setup-reach-job` once, early - impressions and click-through rate only start accruing from the moment this job is created; they never backfill.
+6. Run `python3 metrics.py pull` on whatever schedule you like (daily is normal). The first run opens a one-time browser consent screen; the saved sign-in is then reused (and refreshed automatically) after that.
+
+## Safety checks
+
+Because this tool is shared, it also checks that the saved sign-in it is about to use is really for the channel this house says it is:
+
+- Every real API call is addressed to this house's own channel id (when `YT_CHANNEL_ID` is set), not just "whichever account this sign-in happens to be for". A sign-in for the wrong channel gets refused by YouTube rather than quietly handing back someone else's numbers.
+- Before writing anything at all, `pull` also makes one small check call and cross-checks the channel id already recorded in this house's own saved reach reports. If either check finds the sign-in does not match this house's channel id, the run stops immediately, nothing is written, and a plain-English message explains what to fix (delete the saved sign-in and sign in again as the right account).
+
+A house that has not set `YT_CHANNEL_ID` yet cannot run these checks (there is nothing to compare against) - that is a normal, unfinished-setup state, not a failure, and it does not turn the run red.
 
 ## Credentials
-The OAuth "Desktop app" client secret (downloaded from Google Cloud per the workspace-level runbook `../../../../../shared-brain/runbooks/metrics-api-setup.md`) lives at `secrets/client_secret.json` by default, or point `YT_OAUTH_CLIENT_SECRET` at it in a local `.env`.
-The one-time browser consent happens on first real run. Claude never handles the Google password or the secret file contents.
+
+Claude never handles the Google password or the contents of any secret file - only file paths are ever named in this tool's output, never file contents.
 
 ## Run
-- `python3 metrics.py setup-reach-job` - create the reach-report job once, early. Impressions/CTR only accrue from job creation; they do not backfill.
-- `python3 metrics.py pull` - append one snapshot row per video to the CSV.
 
-Status: under construction (test-first build, started 2026-07-12). Not yet runnable end to end.
+- `python3 metrics.py setup-reach-job` - create the reach-report job once, early.
+- `python3 metrics.py pull` - append one snapshot row per due video to the weekly CSV, and write down what the channel says it has published.
+
+Status: test-first build, shared across houses since 2026-08-25.
