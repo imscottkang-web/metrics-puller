@@ -34,5 +34,9 @@ def test_metrics_names_no_business_over_its_wall_ceiling():
     import or a raised `SealError` surfaces as a normal test failure rather than a
     silently-green skipped step."""
     findings = seal.check_code_layer_blind()
-    ours = [finding for finding in findings if finding.house == "metrics"]
+    # A sub-label like "metrics/.claude/worktrees/x" belongs to this repo's guard too.
+    ours = [
+        finding for finding in findings
+        if finding.house == "metrics" or finding.house.startswith("metrics/")
+    ]
     assert ours == [], "\n\n".join(finding.message for finding in ours)
