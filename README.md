@@ -17,6 +17,12 @@ Keeping each house in its own folder, with its own sign-in, is what rules that o
 - `metrics.py` - the command-line entry point (`setup-reach-job`, `pull`).
 - `tests/` - the test-first suite; no network, fake responses only.
 
+The public uploads lookup shares the sibling radar install's quota ledger and its configured daily allowance.
+It checks the remaining allowance before each Data API call and records successful calls as `metrics:channels` or `metrics:playlistItems`, one unit each.
+Google SEO Search uses those recorded units when learning the reserve for other programs.
+An exhausted allowance keeps the previous published-video list and reports a partial pull, using the existing failure behavior.
+Private Analytics and Reporting API requests do not spend YouTube Data API units and are not charged to this ledger.
+
 Nothing under this folder is specific to any one channel. Everything channel-specific - secrets, saved sign-in, settings, the data files this tool writes - lives outside this folder, in the house's own folder (see below).
 
 ## What a house is, and what it must set up

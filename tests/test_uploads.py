@@ -20,6 +20,12 @@ CHANNEL_ID = "UCanchorandivydatafake"
 PLAYLIST_ID = "UUanchorandivydatafake"
 
 
+@pytest.fixture(autouse=True)
+def isolated_public_quota(tmp_path, monkeypatch):
+    """Real transport tests may write only the fake install's quota ledger."""
+    monkeypatch.setattr("metrics_lib.http._RADAR_TOOL", tmp_path / "radar")
+
+
 class FakeTransport:
     """Answers the two Data API calls off canned bodies, and remembers what it was asked."""
 

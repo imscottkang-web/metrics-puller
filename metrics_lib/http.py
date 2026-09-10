@@ -11,9 +11,11 @@ monkeypatching urllib.request.urlopen (mirrors the radar's yt_api).
 import json
 import socket
 import ssl
+import sys
 import urllib.error
 import urllib.parse
 import urllib.request
+from pathlib import Path
 
 # macOS python.org builds ship without a wired-up CA bundle, so default SSL
 # verification can fail. certifi is used when present, never required - same
@@ -121,6 +123,9 @@ class Transport:
             raise MetricsApiError(0, "could not parse response body") from None
 
 
+_RADAR_TOOL = Path(__file__).resolve().parents[2] / "youtube-radar"
+
+
 class ApiKeyTransport(Transport):
     """The same seam for the PUBLIC YouTube Data API, which takes a key, not a bearer token.
 
@@ -131,9 +136,30 @@ class ApiKeyTransport(Transport):
     reads only what the channel already shows the public.
     """
 
-    def __init__(self, api_key: str, timeout: int = 20) -> None:
+    def __init__(self, api_key: str, timeout: int = 20, *, ledger=None) -> None:
         super().__init__(token_provider=None, timeout=timeout)
         self._api_key = api_key
+        if str(_RADAR_TOOL) not in sys.path:
+            sys.path.append(str(_RADAR_TOOL))
+        if ledger is None:
+            from radar_lib.tool_quota import ledger_for_tool
+
+            ledger = ledger_for_tool(_RADAR_TOOL)
+        self._ledger = ledger
 
     def _authorize(self, params: dict, headers: dict) -> None:
         params["key"] = self._api_key
+
+    def _raw(self, method, url, params=None, body=None, want="json"):
+        from radar_lib.quota import QuotaError, UNIT_COSTS
+
+        endpoint = urllib.parse.urlparse(url).path.rsplit("/", 1)[-1]
+        cost = UNIT_COSTS[endpoint]
+        label = "metrics:" + endpoint
+        try:
+            self._ledger.precheck(cost, label)
+        except QuotaError as exc:
+            raise MetricsApiError(0, str(exc)) from None
+        result = super()._raw(method, url, params=params, body=body, want=want)
+        self._ledger.charge(cost, label)
+        return result
